@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anc-defence"
+version = "0.1.0"
+description = "Hybrid adaptive-filter + neural noise cancellation for defence voice comms (SIH PS 26052)"
+requires-python = ">=3.11,<3.12"
+license = { text = "MIT" }
+
+# NOTE: numpy is pinned <2 because deepfilternet 0.5.6 requires numpy>=1.22,<2.0.
+# torch/torchaudio are installed separately (see scripts/install_dev.ps1) because
+# the CPU/CUDA build must come from the PyTorch index, not PyPI.
+dependencies = [
+    "numpy==1.26.4",
+    "scipy==1.14.1",
+    "soundfile==0.12.1",
+    "sounddevice==0.5.1",
+    "soxr==0.5.0.post1",
+    "deepfilternet==0.5.6",
+    "pydantic==2.9.2",
+    "PyYAML==6.0.2",
+    "matplotlib==3.9.2",
+    "reportlab==4.2.5",
+    "rich==13.9.4",
+    "pystoi==0.4.1",
+    "pesq==0.0.4",
+    "pyroomacoustics==0.7.7",
+    "h5py==3.12.1",
+]
+
+[project.optional-dependencies]
+dnsmos = ["onnxruntime==1.19.2"]
+dev = ["pytest==8.3.3"]
+
+[project.scripts]
+anc = "anc_defence.ui.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["anc_defence*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
