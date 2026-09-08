@@ -4,35 +4,50 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anc-defence"
-version = "0.1.0"
-description = "Hybrid adaptive-filter + neural noise cancellation for defence voice comms (SIH PS 26052)"
-requires-python = ">=3.11,<3.12"
+version = "0.2.0"
+description = "Single-microphone AI noise suppression for defence voice comms (SIH PS 26052)"
+requires-python = ">=3.8"
 license = { text = "MIT" }
 
-# NOTE: numpy is pinned <2 because deepfilternet 0.5.6 requires numpy>=1.22,<2.0.
-# torch/torchaudio are installed separately (see scripts/install_dev.ps1) because
-# the CPU/CUDA build must come from the PyTorch index, not PyPI.
+# Core runtime. Deliberately kept to packages with prebuilt aarch64 wheels so a Jetson
+# install needs no compilation:
+#   deepfilternet 0.5.6 + DeepFilterLib -> manylinux_2_28_aarch64 wheels for cp38-cp311
+#   numpy is pinned <2 because deepfilternet requires numpy>=1.22,<2.0
+# torch/torchaudio are NOT listed: on a Jetson they must come from the NVIDIA index,
+# never from PyPI. See scripts/install_jetson.sh.
 dependencies = [
-    "numpy==1.26.4",
-    "scipy==1.14.1",
-    "soundfile==0.12.1",
-    "sounddevice==0.5.1",
-    "soxr==0.5.0.post1",
+    "numpy>=1.22,<2",
+    "scipy>=1.10,<2",
+    "soundfile>=0.12,<0.13",
+    "sounddevice>=0.4,<0.6",
+    "soxr>=0.3",
     "deepfilternet==0.5.6",
-    "pydantic==2.9.2",
-    "PyYAML==6.0.2",
-    "matplotlib==3.9.2",
-    "reportlab==4.2.5",
-    "rich==13.9.4",
-    "pystoi==0.4.1",
-    "pesq==0.0.4",
-    "pyroomacoustics==0.7.7",
-    "h5py==3.12.1",
+    "pydantic>=2.5,<3",
+    "PyYAML>=6.0",
+    "matplotlib>=3.6",
+    "reportlab>=4.0",
+    "rich>=13.0",
+    "pystoi>=0.3,<0.5",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
-dnsmos = ["onnxruntime==1.19.2"]
-dev = ["pytest==8.3.3"]
+# pesq builds from source on aarch64: needs python3-dev and a C compiler.
+metrics = ["pesq>=0.0.3,<0.0.5"]
+# Only used by the synthetic dataset generator, which the supplied corpus supersedes.
+# Both need a compiler (and libhdf5 for h5py), so they stay out of the core install.
+synth = ["pyroomacoustics>=0.7", "h5py>=3.8"]
+dashboard = ["streamlit>=1.30", "pandas>=1.5"]
+dnsmos = ["onnxruntime>=1.15"]
+dev = ["pytest>=7.4"]
+all = [
+    "pesq>=0.0.3,<0.0.5",
+    "pyroomacoustics>=0.7",
+    "h5py>=3.8",
+    "streamlit>=1.30",
+    "pandas>=1.5",
+    "pytest>=7.4",
+]
 
 [project.scripts]
 anc = "anc_defence.ui.cli:main"
@@ -42,4 +57,4 @@ include = ["anc_defence*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]

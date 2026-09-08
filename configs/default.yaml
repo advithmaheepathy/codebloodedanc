@@ -1,25 +1,29 @@
 # =============================================================================
-# ANC for defence communications - default configuration
+# Single-microphone noise suppression for defence communications
+# SIH problem statement 26052
 #
-# Every parameter the system has appears here. Override on the command line with
-#   anc <command> --set nlms.mu=0.05 --set pipeline.order=dfn_then_nlms
-# or layer another YAML file with
-#   anc <command> -c configs/default.yaml -c configs/my_experiment.yaml
+# Delivered pipeline:
+#     capture -> preprocess -> DeepFilterNet3 -> volume normalisation -> output
+#
+# Override anything on the command line:
+#   anc <command> --set normalise.target_dbfs=-23 --set neural.num_threads=1
+# or layer configs:
+#   anc <command> -c configs/default.yaml -c configs/jetson.yaml
 #
 # The fully resolved configuration is printed at startup and saved into the
 # session directory as config.yaml.
 # =============================================================================
 
 run:
-  seed: 1234                      # every random draw in the system derives from this
-  session_root: sessions          # timestamped output directories are created here
-  name: null                      # optional suffix on the session directory name
-  log_level: INFO                 # DEBUG | INFO | WARNING | ERROR
+  seed: 1234
+  session_root: sessions
+  name: null
+  log_level: INFO
   deterministic_torch: true
 
 # -----------------------------------------------------------------------------
 # Signal geometry. Fixed by DeepFilterNet3: 48 kHz, 20 ms window, 10 ms hop.
-# Changing these will break the neural stage.
+# The supplied corpus is 16 kHz and is upsampled to 48 kHz on load.
 # -----------------------------------------------------------------------------
 audio:
   sample_rate: 48000
@@ -27,69 +31,34 @@ audio:
   fft_size: 960                   # 20 ms
 
 # -----------------------------------------------------------------------------
-# Pre-processing, applied identically to both channels.
+# Pre-processing.
 # -----------------------------------------------------------------------------
 preprocess:
   dc_removal: true
   dc_cutoff_hz: 5.0
   highpass:
     enabled: true
-    cutoff_hz: 80.0               # removes rumble/handling noise below speech
-    order: 2                      # 2nd-order Butterworth
+    cutoff_hz: 80.0               # removes rumble and handling noise below speech
+    order: 2
   guard_nonfinite: true           # zero NaN/Inf frames, count them, log once
   denormal_floor: 1.0e-20
-  reference_gain_db: 0.0          # set from `anc calibrate` if channels differ in level
+  reference_gain_db: 0.0
 
 # -----------------------------------------------------------------------------
-# Voice activity detection. Drives NLMS double-talk protection.
+# Voice activity detection. Drives the volume normaliser's pause hold.
 # -----------------------------------------------------------------------------
 vad:
   enabled: true
   method: energy_flatness
   frame_ms: 10.0
-  energy_margin_db: 8.0           # frame must exceed the tracked noise floor by this
-  flatness_threshold: 0.45        # spectral flatness above this looks like noise
+  energy_margin_db: 8.0
+  flatness_threshold: 0.45
   noise_floor_smoothing: 0.995
-  hangover_ms: 300.0              # keep "speech" latched this long after it ends.
-                                  # Measured: with mu=0.1 and a leaking reference,
-                                  # 300 ms cuts residual speech distortion 5x versus
-                                  # 120 ms, because short pauses inside a word would
-                                  # otherwise let the filter misadapt.
+  hangover_ms: 300.0
   min_speech_ms: 30.0
 
 # -----------------------------------------------------------------------------
-# NLMS adaptive stage.
-#
-# filter_length must comfortably exceed the significant length of the acoustic
-# path between the noise source and the primary microphone. 3840 taps = 80 ms at
-# 48 kHz, which covers the simulated RIRs used by the evaluation set.
-# -----------------------------------------------------------------------------
-nlms:
-  enabled: true
-  impl: fdaf                      # fdaf = partitioned-block frequency domain (real-time default)
-                                  # time = sample-wise reference implementation (test oracle, slow)
-  filter_length: 3840             # 80 ms @ 48 kHz
-  mu: 0.1                         # step size, 0.001 - 1.0
-  eps: 1.0e-6                     # regularisation in the power normalisation
-  leakage: 0.0                    # >0 pulls weights toward zero each update
-  power_smoothing: 0.9            # smoothing of the reference power estimate
-  double_talk:
-    mode: freeze                  # freeze | scale | off - freeze is strongly recommended
-    mu_scale: 0.05                # used when mode = scale
-  impulse_guard:
-    mode: clip                    # off | clip | freeze
-    crest_factor_db: 12.0         # frame crest factor above this counts as impulsive
-    update_clip_sigma: 4.0        # clip the update to this many times its running RMS
-  safeguards:
-    reference_silence_dbfs: -65.0 # do not adapt on a silent reference
-    divergence_margin_db: 6.0     # roll back if output power exceeds input by this
-    weight_norm_limit: 10000.0
-    rollback: true
-    checkpoint_interval_frames: 25
-
-# -----------------------------------------------------------------------------
-# Neural stage: pretrained DeepFilterNet3, unmodified. No fine-tuning is done in
-# this project - see README.md.
+# Neural stage: pretrained DeepFilterNet3, unmodified. Nothing is trained here.
 # -----------------------------------------------------------------------------
 neural:
   enabled: true
@@ -97,27 +66,87 @@ neural:
   model_base_dir: null            # null uses the packaged pretrained weights
   backend: torch
   device: cpu                     # auto | cpu | cuda
-  num_threads: null               # null = torch default; set 1 for the single-thread RTF measurement
-  atten_lim_db: null              # null = no suppression cap; 20-30 trades depth for artefacts
+  num_threads: null               # set to 1 for the single-thread portability figure
+  # Cap on suppression depth. Set from measurement on 72 balanced examples: limiting
+  # attenuation stops the model damaging speech where there is little noise to remove.
+  #   none -> PESQ 2.090  STOI 0.851  speech atten 3.97 dB  (PESQ 2.874 at +15 dB in)
+  #   30   -> PESQ 2.100  STOI 0.856  speech atten 3.71 dB  (PESQ 3.032 at +15 dB in)
+  #   24   -> PESQ 2.045  STOI 0.853  speech atten 3.54 dB
+  atten_lim_db: 30.0
   post_filter: false
-  warmup_frames: 10               # first inference is much slower; warm up before measuring
+  warmup_frames: 10
   streaming:
-    mode: chunked                 # chunked (safe, ~chunk_s latency) | per_hop (true streaming)
+    mode: chunked                 # chunked (safe) | per_hop (not implemented)
     chunk_s: 1.5
     overlap: 0.5
     crossfade_ms: 30.0
+    offline_framing: whole_file   # whole_file = reference inference path for offline runs
+
+# -----------------------------------------------------------------------------
+# Volume normalisation: the second and final stage.
+#
+# agc  speech-aware automatic gain control. Tracks the active speech level, moves
+#      the gain smoothly toward the target, and HOLDS the gain during pauses so
+#      residual noise is not pumped up. Look-ahead soft limiter prevents clipping.
+# peak one static gain so the peak lands on the ceiling
+# rms  one static gain so the active speech level hits the target
+# off  pass through
+# -----------------------------------------------------------------------------
+normalise:
+  mode: agc
+  target_dbfs: -26.0              # ITU-T P.56 convention for speech level
+  min_gain_db: -12.0
+  max_gain_db: 24.0
+  attack_ms: 150.0                # gain rise time constant
+  release_ms: 600.0               # gain fall time constant
+  level_attack_ms: 50.0
+  level_release_ms: 800.0
+  hold_during_pause: true         # the setting that stops the AGC pumping noise
+  gate_dbfs: -60.0
+  limiter_ceiling_dbfs: -1.0
+  limiter_lookahead_ms: 5.0       # the only latency added after the model
+  limiter_release_ms: 120.0
 
 # -----------------------------------------------------------------------------
 # Stage orchestration.
-#   nlms_then_dfn  adaptive cancellation first, then the neural model (default)
-#   dfn_then_nlms  neural model first, then adaptive cancellation
-#   nlms_only / dfn_only / passthrough  for ablations and baselines
+#   dfn_then_normalise  the delivered pipeline
+#   dfn_only            model alone, for the ablation
+#   normalise_only      normalisation alone, for the ablation
+#   passthrough         no processing
+#   nlms_* / *_nlms     rejected two-microphone designs, retained only so they can
+#                       be measured and reported. See README.md.
 # -----------------------------------------------------------------------------
 pipeline:
-  order: nlms_then_dfn
+  order: dfn_then_normalise
 
 # -----------------------------------------------------------------------------
-# Metrics. Heavy ones can be disabled for fast iteration.
+# NLMS settings. Not part of the delivered pipeline; used only when one of the
+# rejected orders is evaluated for the record.
+# -----------------------------------------------------------------------------
+nlms:
+  enabled: true
+  impl: fdaf
+  filter_length: 7680             # 160 ms @ 48 kHz
+  mu: 0.1
+  eps: 1.0e-6
+  leakage: 0.0
+  power_smoothing: 0.9
+  double_talk:
+    mode: freeze
+    mu_scale: 0.05
+  impulse_guard:
+    mode: clip
+    crest_factor_db: 12.0
+    update_clip_sigma: 4.0
+  safeguards:
+    reference_silence_dbfs: -65.0
+    divergence_margin_db: 6.0
+    weight_norm_limit: 10000.0
+    rollback: true
+    checkpoint_interval_frames: 25
+
+# -----------------------------------------------------------------------------
+# Metrics.
 # -----------------------------------------------------------------------------
 metrics:
   pesq: true                      # wideband PESQ, computed at 16 kHz
@@ -127,28 +156,84 @@ metrics:
   segsnr: true
   lsd: true
   snr: true
-  erle: true                      # adaptive-stage specific
+  erle: true
   events: true                    # per-event impulsive suppression and dropout check
-  dnsmos: false                   # needs onnxruntime + the official ONNX model
+  dnsmos: false                   # needs onnxruntime plus the official ONNX model
   pesq_mode: wb
   segsnr_frame_ms: 20.0
-  snr_buckets:                    # results are reported per input-SNR bucket
-    - [-10.0, -5.0]
-    - [-5.0, 0.0]
-    - [0.0, 5.0]
-    - [5.0, 10.0]
-    - [10.0, 15.0]
-    - [15.0, 20.0]
-  headline_snr_range: [-5.0, 10.0]  # the range the headline SNR improvement is quoted over
+  level_align: true               # required: the pipeline ends with a gain stage
+  snr_buckets:
+    - [-12.5, -7.5]
+    - [-7.5, -2.5]
+    - [-2.5, 2.5]
+    - [2.5, 7.5]
+    - [7.5, 12.5]
+    - [12.5, 17.5]
+  headline_snr_range: [-10.0, 15.0]   # the corpus's full SNR range
 
 # -----------------------------------------------------------------------------
-# Evaluation dataset generator. This is an EVALUATION set, minutes to ~1 hour.
-# It is not training data and no training is performed.
+# The supplied single-channel corpus.
 #
-# Key design point: noise is convolved with a room impulse response before being
-# added to the primary channel, while the NLMS reference is the DRY noise. NLMS
-# therefore has to identify a real acoustic path rather than subtract an identical
-# copy of the interference.
+# 5000 labelled examples: gunshot 4385, airplane 135, helicopter 134, engine 125,
+# siren 113, train 108, at SNRs -10/-5/0/5/10/15 dB. Because gunshot is 88% of the
+# corpus, the evaluation uses a category x SNR balanced subset so that "overall"
+# numbers are not simply gunshot numbers, and every table breaks out per category.
+# -----------------------------------------------------------------------------
+plain:
+  root: dataset_plain
+  metadata: dataset_plain/metadata.csv
+  native_sample_rate: 16000
+  per_cell: 6                     # examples per (category, SNR) cell -> 6*36 = 216
+  categories: null                # null = all six
+  snr_values: null                # null = all six
+  max_duration_s: 12.0            # long files are cropped so one outlier cannot dominate
+
+# -----------------------------------------------------------------------------
+# Reporting. Targets are the mandated figures from the problem statement.
+# -----------------------------------------------------------------------------
+report:
+  write_pdf: true
+  write_json: true
+  write_csv: true
+  write_wav: true
+  spectrograms: true
+  targets:
+    snr_improvement_db: 15.0
+    stoi: 0.85
+    pesq: 2.5
+  dpi: 110
+
+# -----------------------------------------------------------------------------
+# Offline inputs.
+# -----------------------------------------------------------------------------
+offline:
+  primary: null                   # single-file mode: the noisy WAV
+  reference: null                  # only used by the rejected adaptive designs
+  clean: null                     # clean target; enables PESQ/STOI/SI-SDR
+  manifest: null                  # a generated manifest, instead of the plain corpus
+  limit: null
+  workers: 0                      # 0 = pick from the core count, 1 = serial
+
+# -----------------------------------------------------------------------------
+# Live single-microphone mode.
+# -----------------------------------------------------------------------------
+live:
+  duration_s: 30.0
+  input_device: null              # index or name substring; null = system default
+  output_device: null
+  monitor: true
+  monitor_gain_db: -6.0           # USE HEADPHONES: speaker monitoring will howl
+  blocksize: 480
+  ring_capacity_s: 8.0
+  noise_file: null
+  noise_snr_db: 0.0
+  noise_rir: true
+  calibration_s: 2.0
+  save_streams: true
+
+# -----------------------------------------------------------------------------
+# Synthetic dataset generator. Superseded by the supplied corpus; retained so the
+# repository can generate its own evaluation data when none is provided.
 # -----------------------------------------------------------------------------
 dataset:
   out_dir: data/eval
@@ -165,21 +250,21 @@ dataset:
   subsets: [main, impulsive, low_snr]
   rir:
     enabled: true
-    source: simulated             # pyroomacoustics image-source simulation
+    source: simulated
     room_dim_min: [3.0, 3.0, 2.4]
     room_dim_max: [8.0, 7.0, 3.2]
     rt60_min_s: 0.15
     rt60_max_s: 0.35
     max_order: 10
     n_rirs: 12
-    truncate_db: -40.0            # RIR significant length is reported down to this level
-    speech_rir: false             # true makes the target reverberant clean speech
+    truncate_db: -40.0
+    speech_rir: false
   impulsive:
     events_per_minute_min: 4.0
     events_per_minute_max: 20.0
     peak_level_dbfs_min: -18.0
     peak_level_dbfs_max: -3.0
-    preserve_crest_factor: true   # never peak-normalise a transient away
+    preserve_crest_factor: true
     min_gap_s: 0.25
   augment:
     clipping_prob: 0.25
@@ -190,46 +275,3 @@ dataset:
     spectral_tilt_prob: 0.25
     spectral_tilt_db_per_khz: [-1.0, 1.0]
     mic_self_noise_dbfs: -70.0
-
-# -----------------------------------------------------------------------------
-# Reporting. Targets are the mandated figures from the problem statement and are
-# shown as PASS/FAIL in the report.
-# -----------------------------------------------------------------------------
-report:
-  write_pdf: true
-  write_json: true
-  write_csv: true
-  write_wav: true
-  spectrograms: true
-  targets:
-    snr_improvement_db: 15.0
-    stoi: 0.85
-    pesq: 2.5
-  dpi: 110
-
-# -----------------------------------------------------------------------------
-# Offline file mode inputs.
-# -----------------------------------------------------------------------------
-offline:
-  primary: null                   # noisy WAV (speech + noise)
-  reference: null                  # noise reference for NLMS; null disables the adaptive stage
-  clean: null                     # clean target; enables PESQ/STOI/SI-SDR
-  manifest: null                  # evaluate a whole generated dataset instead
-  limit: null
-
-# -----------------------------------------------------------------------------
-# Live modes (single built-in microphone).
-# -----------------------------------------------------------------------------
-live:
-  duration_s: 30.0
-  input_device: null              # index or name substring; null = system default
-  output_device: null
-  monitor: true                   # play the enhanced signal to the output device
-  monitor_gain_db: -6.0           # USE HEADPHONES: speaker monitoring will howl
-  blocksize: 480                  # 10 ms
-  ring_capacity_s: 8.0
-  noise_file: null                # required for the injected-noise mode
-  noise_snr_db: 0.0               # SNR at which the noise is digitally mixed in
-  noise_rir: true                 # convolve injected noise with an RIR; reference stays dry
-  calibration_s: 2.0              # noise-only period used to pre-converge NLMS
-  save_streams: true

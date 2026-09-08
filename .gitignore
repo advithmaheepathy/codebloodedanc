@@ -18,3 +18,7 @@ cache/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Supplied evaluation corpus: licence not verified, never commit it
+dataset_plain/
+legacy/*.pdf

@@ -138,7 +138,14 @@ class NlmsSafeguardCfg(_Base):
 class NlmsCfg(_Base):
     enabled: bool = True
     impl: Literal["fdaf", "time"] = "fdaf"
-    filter_length: int = Field(default=3840, ge=128, le=8192)
+    # 7680 taps = 160 ms at 48 kHz. Chosen by measurement: the simulated RIRs have a
+    # significant length (to -40 dB) of 69-155 ms, and cancellation of a real
+    # convolved path improves monotonically with coverage:
+    #   1920 taps ( 40 ms) ->  8.3 dB ERLE, FDAF RTF 0.034
+    #   3840 taps ( 80 ms) -> 18.1 dB ERLE, FDAF RTF 0.053
+    #   5760 taps (120 ms) -> 29.5 dB ERLE, FDAF RTF 0.141
+    #   7680 taps (160 ms) -> 42.3 dB ERLE, FDAF RTF 0.184
+    filter_length: int = Field(default=7680, ge=128, le=16384)
     mu: float = Field(default=0.1, gt=0.0, le=1.0)
     eps: float = Field(default=1e-6, gt=0.0)
     leakage: float = Field(default=0.0, ge=0.0, lt=1.0)
@@ -164,6 +171,13 @@ class StreamingCfg(_Base):
     chunk_s: float = Field(default=1.5, gt=0.1, le=10.0)
     overlap: float = Field(default=0.5, ge=0.0, lt=1.0)
     crossfade_ms: float = Field(default=30.0, ge=0.0)
+    offline_framing: Literal["whole_file", "chunked"] = Field(
+        default="whole_file",
+        description=(
+            "Offline mode processes whole files by default (the reference inference path). "
+            "Set to 'chunked' to reproduce exactly what the live path produces."
+        ),
+    )
 
 
 class NeuralCfg(_Base):
@@ -178,8 +192,16 @@ class NeuralCfg(_Base):
         default=None,
         description="Torch intra-op thread count. Set to 1 for the single-thread edge-readiness measurement.",
     )
+    # 30 dB chosen by measurement on 72 balanced corpus examples. Capping suppression
+    # depth stops the model damaging speech where there is little noise to remove:
+    #   atten_lim_db  PESQ    STOI    SNRi     speech atten   PESQ at +15 dB in
+    #   none          2.090   0.851   +2.05    3.97 dB        2.874
+    #   30            2.100   0.856   +2.08    3.71 dB        3.032   <- default
+    #   24            2.045   0.853   +2.02    3.54 dB        3.070
+    # 30 dB is better than no limit on every axis, and 24 dB starts costing PESQ at low
+    # SNR without buying anything.
     atten_lim_db: Optional[float] = Field(
-        default=None, ge=0.0, le=100.0, description="Cap suppression depth; None means no limit."
+        default=30.0, ge=0.0, le=100.0, description="Cap suppression depth; None means no limit."
     )
     post_filter: bool = False
     warmup_frames: int = Field(default=10, ge=0)
@@ -189,11 +211,73 @@ class NeuralCfg(_Base):
 # ----------------------------------------------------------------------- pipeline
 
 
-PipelineOrder = Literal["nlms_then_dfn", "dfn_then_nlms", "nlms_only", "dfn_only", "passthrough"]
+class NormaliseCfg(_Base):
+    """Volume normalisation, the second and final pipeline stage.
+
+    ``agc`` is a speech-aware automatic gain control: it tracks the active speech
+    level, moves the gain toward the target smoothly, and holds the gain during
+    pauses so residual noise is not pumped up. A look-ahead soft limiter prevents
+    clipping and is the only stage after the model that adds latency.
+    """
+
+    mode: Literal["agc", "peak", "rms", "off"] = "agc"
+    target_dbfs: float = Field(
+        default=-26.0,
+        description="Target active speech level. -26 dBFS is the ITU-T P.56 convention "
+        "for speech level in telephony tests and is close to -23 LUFS for speech.",
+    )
+    min_gain_db: float = Field(default=-12.0, description="Most the AGC may attenuate.")
+    max_gain_db: float = Field(
+        default=24.0,
+        description="Most the AGC may amplify. Caps how loud a near-silent frame can be made.",
+    )
+    attack_ms: float = Field(default=150.0, gt=0.0, description="Gain rise time constant.")
+    release_ms: float = Field(default=600.0, gt=0.0, description="Gain fall time constant.")
+    level_attack_ms: float = Field(default=50.0, gt=0.0)
+    level_release_ms: float = Field(default=800.0, gt=0.0)
+    hold_during_pause: bool = Field(
+        default=True,
+        description="Freeze the gain when the frame is neither speech nor loud. Turning this off "
+        "makes the AGC chase the noise floor in pauses and audibly pump the residual noise.",
+    )
+    gate_dbfs: float = Field(
+        default=-60.0, description="Frames below this level never update the speech-level estimate."
+    )
+    active_range_db: float = Field(
+        default=20.0,
+        description="A frame within this many dB of the running peak counts as active even if the "
+        "VAD does not flag it. Without this fallback a recording with no pauses gets no "
+        "normalisation at all, because the VAD's noise-floor tracker adapts up to a "
+        "continuously active signal and then never reports speech.",
+    )
+    peak_decay_db_per_s: float = Field(
+        default=1.0,
+        description="Decay rate of the running peak used by the active-frame test. This has to be "
+        "slow: at 6 dB/s the reference is lost within a second, after which a genuine pause drifts "
+        "back inside the active window and the gain starts chasing the noise floor again. 1 dB/s "
+        "keeps the reference stable across a normal utterance.",
+    )
+    limiter_ceiling_dbfs: float = Field(default=-1.0, le=0.0)
+    limiter_lookahead_ms: float = Field(default=5.0, ge=0.0)
+    limiter_release_ms: float = Field(default=120.0, gt=0.0)
+
+
+PipelineOrder = Literal[
+    # Current design: single microphone, neural suppression then volume normalisation.
+    "dfn_then_normalise",
+    "dfn_only",
+    "normalise_only",
+    "passthrough",
+    # Retained only so the rejected two-microphone designs can still be measured and
+    # reported. Not part of the delivered pipeline. See README.md.
+    "nlms_then_dfn",
+    "dfn_then_nlms",
+    "nlms_only",
+]
 
 
 class PipelineCfg(_Base):
-    order: PipelineOrder = "nlms_then_dfn"
+    order: PipelineOrder = "dfn_then_normalise"
 
 
 # ------------------------------------------------------------------------ metrics
@@ -212,6 +296,13 @@ class MetricsCfg(_Base):
     dnsmos: bool = False
     pesq_mode: Literal["wb", "nb"] = "wb"
     segsnr_frame_ms: float = 20.0
+    level_align: bool = Field(
+        default=True,
+        description="Scale the signal under test onto the clean reference before computing the "
+        "level-sensitive metrics (segmental SNR, LSD, direct SNR). Without this the volume "
+        "normalisation stage would appear to change quality when it has only changed gain. "
+        "PESQ, STOI and SI-SDR are unaffected either way.",
+    )
     snr_buckets: list[tuple[float, float]] = [
         (-10.0, -5.0),
         (-5.0, 0.0),
@@ -313,6 +404,33 @@ class ReportCfg(_Base):
 # -------------------------------------------------------------------------- modes
 
 
+class PlainDatasetCfg(_Base):
+    """The supplied single-channel corpus: ``dataset_plain`` with a metadata CSV.
+
+    16 kHz mono WAV triplets (clean / noisy / noise-only) with the noise category and
+    the mixing SNR recorded per example. Everything is upsampled to 48 kHz on load
+    because the neural model is a 48 kHz model.
+    """
+
+    root: Path = Path("dataset_plain")
+    metadata: Path = Path("dataset_plain/metadata.csv")
+    native_sample_rate: int = 16000
+    # Stratified sampling for the fast evaluation: this many examples per
+    # (category, SNR) cell, drawn with the run seed so the subset is reproducible.
+    per_cell: int = Field(default=6, ge=1)
+    categories: Optional[list[str]] = Field(
+        default=None, description="None uses every category present in the metadata."
+    )
+    snr_values: Optional[list[float]] = Field(
+        default=None, description="None uses every SNR present in the metadata."
+    )
+    max_duration_s: float = Field(
+        default=12.0,
+        gt=0.0,
+        description="Long files are cropped for the evaluation so one outlier cannot dominate.",
+    )
+
+
 class OfflineCfg(_Base):
     primary: Optional[Path] = None
     reference: Optional[Path] = None
@@ -321,6 +439,12 @@ class OfflineCfg(_Base):
         default=None, description="Dataset manifest to evaluate in bulk instead of a single file."
     )
     limit: Optional[int] = Field(default=None, ge=1, description="Evaluate only the first N manifest items.")
+    workers: int = Field(
+        default=0,
+        ge=0,
+        description="Parallel worker processes for batch evaluation. 0 picks a sensible default "
+        "from the core count; 1 forces serial execution.",
+    )
 
 
 class LiveCfg(_Base):
@@ -350,9 +474,11 @@ class Config(_Base):
     vad: VadCfg = VadCfg()
     nlms: NlmsCfg = NlmsCfg()
     neural: NeuralCfg = NeuralCfg()
+    normalise: NormaliseCfg = NormaliseCfg()
     pipeline: PipelineCfg = PipelineCfg()
     metrics: MetricsCfg = MetricsCfg()
     dataset: DatasetCfg = DatasetCfg()
+    plain: PlainDatasetCfg = PlainDatasetCfg()
     report: ReportCfg = ReportCfg()
     offline: OfflineCfg = OfflineCfg()
     live: LiveCfg = LiveCfg()

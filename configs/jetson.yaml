@@ -1,0 +1,54 @@
+# =============================================================================
+# Jetson Orin NX overlay.
+#
+#   anc -c configs/default.yaml -c configs/jetson.yaml evaluate
+#
+# Only the values that need to differ on the board are listed; everything else is
+# inherited from default.yaml.
+#
+# Rationale for each choice is stated so it can be revisited with measurements from
+# the board rather than guesswork.
+# =============================================================================
+
+run:
+  log_level: INFO
+
+neural:
+  # DeepFilterNet3 is 2.1M parameters and runs per 10 ms frame. On x86 the CPU path
+  # measured RTF 0.05-0.06 single-threaded, and eight threads only reached 0.05, so
+  # the workload is latency bound rather than throughput bound. A tiny recurrent model
+  # like this is usually dominated by kernel-launch overhead on a GPU, so CPU is the
+  # starting point. Run `anc benchmark` on the board and switch to cuda only if it
+  # actually wins.
+  device: cpu
+  # Orin NX has 8 Cortex-A78AE cores. Leaving two for the audio callback and the OS.
+  num_threads: 6
+  streaming:
+    # Smaller chunks cut the live-path buffering latency. Verify the quality cost on
+    # the board with `anc benchmark --chunk-sizes 0.5,1.0,1.5`.
+    chunk_s: 1.0
+
+offline:
+  # Each worker holds its own model instance. Four workers on a 16 GB board is
+  # comfortable; raise it after checking peak RSS in the report.
+  workers: 4
+
+plain:
+  # Fewer examples per cell so an evaluation finishes quickly on the board. The
+  # x86 numbers are the reference; this is for confirming the board agrees.
+  per_cell: 3
+  max_duration_s: 10.0
+
+report:
+  dpi: 100
+
+live:
+  # USB audio interfaces are commonly happier with a slightly larger block.
+  blocksize: 480
+  ring_capacity_s: 12.0
+
+metrics:
+  # PESQ needs a compiler on aarch64. If `pip install .[metrics]` failed, set this to
+  # false and the report will show PESQ as unavailable rather than failing the run.
+  pesq: true
+  dnsmos: false

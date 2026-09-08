@@ -172,10 +172,12 @@ class SafeguardEngine:
         self.impulse = ImpulseDetector(crest_factor_db_threshold=cfg.impulse_guard.crest_factor_db)
         self._ref_silence_lin = 10.0 ** (cfg.safeguards.reference_silence_dbfs / 20.0)
         self._logged_divergence = False
+        self._ratio_ema_db: Optional[float] = None
 
     def reset(self) -> None:
         self.vad.reset()
         self.impulse.reset()
+        self._ratio_ema_db = None
 
     def decide(self, d_block: np.ndarray, x_block: np.ndarray) -> tuple[float, str, bool, bool]:
         """Return (mu_scale, state_code, speech_flag, impulse_flag)."""
@@ -208,15 +210,33 @@ class SafeguardEngine:
     def check_divergence_scalar(
         self, weight_norm: float, in_power: float, out_power: float
     ) -> tuple[bool, str]:
-        """Same check, for implementations that track the norm incrementally."""
+        """Same check, for implementations that track the norm incrementally.
+
+        The power-ratio test runs on a smoothed ratio rather than a single block. A
+        transient - a gunshot arriving in the reference before its reverberant copy
+        arrives in the primary - can legitimately push one block's output above its
+        input without the filter having diverged at all, and rolling back on that
+        would throw away good convergence. A single block is still enough to trigger
+        if it is catastrophically bad.
+        """
         sg = self.cfg.safeguards
         norm = weight_norm
         if not np.isfinite(norm) or norm > sg.weight_norm_limit:
             return True, f"weight norm {norm:.3g} exceeded limit {sg.weight_norm_limit:.3g}"
         if in_power > _EPS and out_power > _EPS:
             ratio_db = 10.0 * np.log10(out_power / in_power)
-            if ratio_db > sg.divergence_margin_db:
-                return True, f"output exceeded input by {ratio_db:.1f} dB"
+            self._ratio_ema_db = (
+                ratio_db
+                if self._ratio_ema_db is None
+                else 0.75 * self._ratio_ema_db + 0.25 * ratio_db
+            )
+            if ratio_db > sg.divergence_margin_db + 12.0:
+                return True, f"output exceeded input by {ratio_db:.1f} dB in a single block"
+            if self._ratio_ema_db > sg.divergence_margin_db:
+                return True, (
+                    f"smoothed output/input ratio {self._ratio_ema_db:.1f} dB exceeded the "
+                    f"{sg.divergence_margin_db:.1f} dB margin"
+                )
         return False, ""
 
     def log_divergence_once(self, reason: str) -> None:
