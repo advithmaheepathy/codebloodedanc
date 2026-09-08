@@ -121,9 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--output-device", default=None, help="live: output device index or name substring")
     p_run.add_argument("--no-monitor", action="store_true", help="live: do not play the output")
     p_run.add_argument(
-        "--latency", default=None, choices=["low_latency", "quality", "custom"],
-        help="live: latency profile. low_latency ~105 ms responsive (default), "
-             "quality ~1.5 s high-fidelity, custom uses neural.streaming.* as configured",
+        "--latency", default=None,
+        choices=["low_latency", "balanced", "quality", "max_suppression", "custom"],
+        help="live: latency/suppression profile. low_latency ~265 ms (default), "
+             "balanced ~515 ms, quality ~1015 ms, max_suppression ~1015 ms with the "
+             "post-filter for the most aggressive cleaning, custom uses neural.streaming.*",
     )
 
     p_eval = add_parser("evaluate", help="run the method comparison over the corpus")

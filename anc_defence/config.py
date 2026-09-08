@@ -213,16 +213,19 @@ class NeuralCfg(_Base):
         default=None,
         description="Torch intra-op thread count. Set to 1 for the single-thread edge-readiness measurement.",
     )
-    # 30 dB chosen by measurement on 72 balanced corpus examples. Capping suppression
-    # depth stops the model damaging speech where there is little noise to remove:
-    #   atten_lim_db  PESQ    STOI    SNRi     speech atten   PESQ at +15 dB in
-    #   none          2.090   0.851   +2.05    3.97 dB        2.874
-    #   30            2.100   0.856   +2.08    3.71 dB        3.032   <- default
-    #   24            2.045   0.853   +2.02    3.54 dB        3.070
-    # 30 dB is better than no limit on every axis, and 24 dB starts costing PESQ at low
-    # SNR without buying anything.
+    # No cap by default. A 30 dB cap was tried first because it improved the
+    # corpus-wide PESQ/STOI aggregate, but measuring the thing a listener actually
+    # notices - level drop in talker-silent regions - showed what it costs:
+    #
+    #   whole file, no cap    noise reduction +35.9 dB   PESQ 1.364  STOI 0.688
+    #   whole file, cap 30    noise reduction +26.2 dB   PESQ 1.357  STOI 0.697
+    #
+    # ~10 dB less noise removed for +0.009 STOI. At low SNR, where noise actually
+    # matters, the cap buys almost nothing; it only protects speech in near-clean audio
+    # (at +15 dB input it lifted PESQ 2.874 -> 3.032). Removing noise is the product
+    # goal, so no cap is the default; set 20-30 if the input is usually already clean.
     atten_lim_db: Optional[float] = Field(
-        default=30.0, ge=0.0, le=100.0, description="Cap suppression depth; None means no limit."
+        default=None, ge=0.0, le=100.0, description="Cap suppression depth; None means no limit."
     )
     post_filter: bool = False
     warmup_frames: int = Field(default=10, ge=0)
@@ -477,14 +480,21 @@ class LiveCfg(_Base):
     blocksize: int = 480
     ring_capacity_s: float = Field(default=8.0, gt=0.5)
     # Latency profile for the live neural framing.
-    #   low_latency  60 ms chunk, ~105 ms end-to-end, RTF ~0.07, reproduces the offline
-    #                path to ~12 dB SI-SDR. This is the responsive "talk and hear it now"
-    #                mode. Measured, not theoretical.
-    #   quality      1.5 s chunk, ~1.5 s latency, ~17.5 dB agreement. Continuous but not
-    #                responsive; use it when latency does not matter (e.g. processing a
-    #                monologue) and fidelity to the offline result is wanted.
-    #   custom       use whatever neural.streaming.chunk_s / context_s are set to.
-    latency_profile: Literal["low_latency", "quality", "custom"] = "low_latency"
+    # Measured on 12 corpus examples at <= 0 dB SNR. "noise red." is the level drop in
+    # talker-silent regions; "sp.atten" is how much quieter the speech became.
+    #
+    #   chunk    noise red.  sp.atten   latency    notes
+    #    60 ms    +33.9 dB    12.4 dB     75 ms    speech visibly damaged: too little context
+    #   250 ms    +37.5 dB    10.6 dB    265 ms    low_latency
+    #   500 ms    +37.5 dB     9.6 dB    515 ms    balanced
+    #     1 s     +37.5 dB     8.1 dB   1015 ms    quality
+    #     1 s +postfilter +44.7 dB 8.6 dB 1015 ms  max_suppression
+    #
+    # 60 ms was the original low_latency setting and it was a bad trade: it removed less
+    # noise AND damaged the speech more than 250 ms, for 190 ms less delay.
+    latency_profile: Literal[
+        "low_latency", "balanced", "quality", "max_suppression", "custom"
+    ] = "low_latency"
     noise_file: Optional[Path] = None
     noise_snr_db: float = 0.0
     noise_rir: bool = Field(

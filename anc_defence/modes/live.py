@@ -343,14 +343,24 @@ class LiveEngine:
         return self.pipeline.normaliser
 
 
+# (chunk_s, context_s, crossfade_ms, post_filter). Measured on 12 corpus examples at
+# <= 0 dB SNR, with no attenuation cap. Noise reduction is the level drop in
+# talker-silent regions; speech attenuation is how much quieter the talker became.
+#
+#   profile           chunk   latency   noise red.  sp.atten
+#   low_latency       250 ms   265 ms    +37.5 dB    10.6 dB
+#   balanced          500 ms   515 ms    +37.5 dB     9.6 dB
+#   quality             1 s   1015 ms    +37.5 dB     8.1 dB
+#   max_suppression     1 s   1015 ms    +44.7 dB     8.6 dB   (post-filter on)
+#
+# 60 ms chunks were tried as the low_latency default and rejected: they removed less
+# noise (+33.9 dB) and damaged the speech far more (12.4 dB) than 250 ms, in exchange
+# for 190 ms less delay. Not a good trade.
 LATENCY_PROFILES = {
-    # (chunk_s, context_s, crossfade_ms). Chosen from measurement on this workload:
-    # agreement with the offline path is set by chunk size, extra context beyond ~0.25 s
-    # buys nothing, and RTF has ample headroom at 60 ms chunks.
-    #   chunk 60 ms  -> ~105 ms end-to-end, RTF ~0.07, ~12 dB SI-SDR vs offline
-    #   chunk 1.5 s  -> ~1.5 s latency,     RTF ~0.13, ~17.5 dB
-    "low_latency": (0.06, 0.25, 5.0),
-    "quality": (1.5, 0.25, 30.0),
+    "low_latency": (0.25, 0.25, 10.0, False),
+    "balanced": (0.5, 0.25, 20.0, False),
+    "quality": (1.0, 0.25, 30.0, False),
+    "max_suppression": (1.0, 0.25, 30.0, True),
 }
 
 
@@ -363,12 +373,13 @@ def apply_latency_profile(cfg: Config) -> Config:
     profile = cfg.live.latency_profile
     if profile == "custom":
         return cfg
-    chunk_s, context_s, crossfade_ms = LATENCY_PROFILES[profile]
+    chunk_s, context_s, crossfade_ms, post_filter = LATENCY_PROFILES[profile]
     out = cfg.model_copy(deep=True)
     out.neural.streaming.chunk_s = chunk_s
     out.neural.streaming.context_s = context_s
     out.neural.streaming.crossfade_ms = crossfade_ms
     out.neural.streaming.overlap = 0.0  # small chunks crossfade, they do not overlap-hop
+    out.neural.post_filter = post_filter
     return out
 
 

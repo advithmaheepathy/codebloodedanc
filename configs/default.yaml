@@ -67,12 +67,15 @@ neural:
   backend: torch
   device: cpu                     # auto | cpu | cuda
   num_threads: null               # set to 1 for the single-thread portability figure
-  # Cap on suppression depth. Set from measurement on 72 balanced examples: limiting
-  # attenuation stops the model damaging speech where there is little noise to remove.
-  #   none -> PESQ 2.090  STOI 0.851  speech atten 3.97 dB  (PESQ 2.874 at +15 dB in)
-  #   30   -> PESQ 2.100  STOI 0.856  speech atten 3.71 dB  (PESQ 3.032 at +15 dB in)
-  #   24   -> PESQ 2.045  STOI 0.853  speech atten 3.54 dB
-  atten_lim_db: 30.0
+  # Cap on suppression depth. null = no cap = maximum noise removal.
+  # A 30 dB cap was tried first because it improved the corpus-wide PESQ/STOI aggregate,
+  # but measured against what a listener notices - level drop in talker-silent regions -
+  # it costs about 10 dB of actual noise reduction:
+  #   no cap  -> noise reduction +35.9 dB   PESQ 1.364  STOI 0.688   (at <= 0 dB SNR)
+  #   cap 30  -> noise reduction +26.2 dB   PESQ 1.357  STOI 0.697
+  # Set 20-30 only if the input is usually already fairly clean, where the cap protects
+  # speech (at +15 dB input it lifted PESQ from 2.874 to 3.032).
+  atten_lim_db: null
   post_filter: false
   warmup_frames: 10
   streaming:
@@ -235,6 +238,13 @@ live:
   noise_rir: true
   calibration_s: 2.0
   save_streams: true
+  # Latency vs suppression, measured at <= 0 dB SNR with no attenuation cap:
+  #   low_latency      250 ms chunk ->  265 ms delay, +37.5 dB noise removed, 10.6 dB sp.atten
+  #   balanced         500 ms chunk ->  515 ms delay, +37.5 dB, 9.6 dB
+  #   quality            1 s chunk  -> 1015 ms delay, +37.5 dB, 8.1 dB
+  #   max_suppression    1 s + post-filter -> 1015 ms, +44.7 dB, 8.6 dB
+  # 60 ms chunks were rejected: less noise removed (+33.9 dB) AND worse speech (12.4 dB).
+  latency_profile: low_latency
 
 # -----------------------------------------------------------------------------
 # Synthetic dataset generator. Superseded by the supplied corpus; retained so the

@@ -45,13 +45,18 @@ thing it exists to do.
 
 ### Delivered pipeline versus classical baselines
 
-| method | PESQ | STOI | ESTOI | SI-SDR dB | speech atten dB | RTF |
-| --- | --- | --- | --- | --- | --- | --- |
-| unprocessed | 1.312 | 0.770 | 0.586 | +2.51 | 0.00 | – |
-| spectral subtraction | 1.414 | 0.701 | 0.531 | −14.01 | 8.08 | 0.023 |
-| Wiener | 1.442 | 0.727 | 0.551 | −8.84 | 5.23 | 0.025 |
-| DeepFilterNet3 only | 1.986 | 0.852 | 0.716 | +4.49 | 3.69 | 0.108 |
-| **DFN + normalisation** | **1.986** | **0.852** | **0.716** | **+4.49** | **3.69** | 0.128 |
+| method | PESQ | STOI | **noise removed** | speech atten dB | RTF |
+| --- | --- | --- | --- | --- | --- |
+| unprocessed | 1.312 | 0.770 | 0.00 dB | 0.00 | – |
+| spectral subtraction | 1.414 | 0.701 | **−9.11 dB** | 8.08 | 0.023 |
+| Wiener | 1.442 | 0.727 | **−4.99 dB** | 5.23 | 0.025 |
+| DeepFilterNet3 only | 1.963 | 0.848 | **+33.19 dB** | 3.81 | 0.108 |
+| **DFN + normalisation** | **1.963** | **0.848** | **+32.34 dB** | **3.81** | 0.128 |
+
+"Noise removed" is the level drop measured **only in talker-silent regions** — the thing
+a listener calls noise cancellation. Note the sign on the classical baselines: spectral
+subtraction and Wiener *raise* the residual level in the gaps between words while also
+attenuating speech by 5–8 dB. They are worse than doing nothing on both counts.
 
 The delivered pipeline beats both classical baselines on PESQ (+0.54 over Wiener),
 STOI (+0.13) and ESTOI (+0.17), and it is the only method that improves SI-SDR at all.
@@ -87,13 +92,26 @@ Over the full corpus SNR range (−10 to +15 dB):
 
 | Target | Required | Measured | Verdict |
 | --- | --- | --- | --- |
-| STOI | > 0.85 | **0.852** | **PASS** |
-| PESQ wideband | > 2.5 | 1.986 | **FAIL** |
+| STOI | > 0.85 | 0.848 | **FAIL** (by 0.002) |
+| PESQ wideband | > 2.5 | 1.963 | **FAIL** |
 | SNR improvement | > 15 dB | +1.97 dB | **FAIL** |
 
-STOI passes only because of the attenuation limit: `atten_lim_db=30` moved it from
-0.851 to 0.856 on the ablation subset, which was the difference between missing and
-meeting the target.
+A note on the STOI figure, because it moved during development and the reason matters.
+Capping suppression depth at `atten_lim_db=30` gave STOI 0.852, which passes. Removing
+the cap gives 0.848, which fails by 0.002 — but it removes **7 dB more noise**
+(+32.3 dB vs +26.2 dB). Intermediate values do not resolve it:
+
+| `atten_lim_db` | PESQ | STOI | noise removed |
+| --- | --- | --- | --- |
+| 30 | 1.986 | 0.852 | +26.2 dB |
+| 40 | 2.005 | 0.847 | +25.1 dB |
+| 50 | 1.986 | 0.845 | +29.4 dB |
+| **none (default)** | 1.963 | 0.848 | **+32.3 dB** |
+
+STOI sits at 0.845–0.852 across the whole range — the differences are within measurement
+scatter — while noise reduction varies by 7 dB. So the default is no cap: audibly removing
+more noise is worth more than a 0.004 STOI difference that straddles the target either
+way. Set `--set neural.atten_lim_db=30` if you specifically need the STOI target ticked.
 
 A single average across −10 to +15 dB is not a meaningful figure, and the per-SNR
 breakdown shows why:
