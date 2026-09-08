@@ -286,23 +286,23 @@ def _run_batch(
         supp = headline.get("snr_improvement_db_suppression_range")
         rns = headline.get("residual_noise_snr_db")
         comp = headline.get("output_snr_db")
-        rns_txt = (
-            f"the classical output SNR - enhanced-speech power over residual-noise power - "
-            f"averages {rns:+.1f} dB"
-            if rns is not None and rns == rns
-            else f"the component output SNR averages {comp:+.1f} dB"
-        )
+        gain = headline.get("snr_gain_db")
+        gain_txt = f" and improves it by {gain:+.1f} dB" if gain is not None and gain == gain else ""
         data.target_scope = (
             f"Delivered pipeline <b>{DEFAULT_METHOD}</b>, over input SNR {lo:g} to {hi:g} dB "
-            f"({headline['n']} measurements, category-balanced). The mandated 'SNR > 15 dB' is "
-            f"the absolute <b>output SNR</b> of the enhanced speech (speech power over residual "
-            f"noise plus distortion), matching its siblings STOI and PESQ which are also absolute "
-            f"output figures: {rns_txt}. This is a different quantity from the SI-SDR "
-            f"<i>improvement</i> over the noisy input, which is bounded by how much noise was "
-            f"present and so is reported separately as context - it is {supp:+.2f} dB over the "
-            f"noisy {slo:g} to {shi:g} dB regime and {full:+.2f} dB averaged across the full "
-            f"range (near-clean inputs pull it negative, as there is nothing left to remove). "
-            f"The full per-SNR breakdown is below."
+            f"({headline['n']} measurements, category-balanced). The mandated 'SNR > 15 dB' is read "
+            f"as the absolute <b>output SNR</b> of the enhanced speech, matching its siblings STOI "
+            f"and PESQ which are also absolute output figures. It is measured by recovering the "
+            f"time-frequency gain the enhancer applied to the real mixture and applying that same "
+            f"gain to the known clean and noise-only components, so the two sum to the output; the "
+            f"enhancer is non-linear, so enhancing the components separately would not be valid. "
+            f"The delivered pipeline reaches {rns:.1f} dB output SNR{gain_txt}. This is a single "
+            f"microphone with no noise reference; the problem statement's 15 dB figure is quoted "
+            f"for a primary-plus-reference microphone pair with an adaptive filter, and the "
+            f"two-microphone measurements in the rejected-designs table are the like-for-like "
+            f"comparison. The SI-SDR improvement, which additionally charges for speech "
+            f"distortion, is {supp:+.2f} dB over the noisy {slo:g} to {shi:g} dB regime and "
+            f"{full:+.2f} dB across the full range. Per-SNR breakdown below."
         )
     data.payload["headline"] = headline
 
@@ -415,7 +415,7 @@ def _run_batch(
         group_by=("method", "snr_db"),
     )
     snr_table = [["method", "input SNR dB", "n", "PESQ", "STOI", "out SNR dB",
-                  "noise red. dB", "SNRi dB"]]
+                  "SNR gain dB", "noise red. dB", "SI-SDRi dB"]]
     for row in sorted(snr_rows, key=lambda r: (_method_rank(str(r["method"])), float(r["snr_db"]))):
         out_snr = row.get("residual_noise_snr_db")
         if out_snr is None or out_snr != out_snr:
@@ -423,16 +423,18 @@ def _run_batch(
         snr_table.append([
             str(row["method"]), f"{float(row['snr_db']):g}", str(row["n"]),
             _fmt(row.get("pesq")), _fmt(row.get("stoi")), _fmt(out_snr, "+.1f"),
+            _fmt(row.get("snr_gain_db"), "+.1f"),
             _fmt(row.get("noise_reduction_db"), "+.1f"),
             _fmt(row.get("snr_improvement_db"), "+.2f"),
         ])
     data.add_table("Results per input SNR", snr_table,
-                   "Output SNR (speech over residual noise) and noise reduction are absolute output "
-                   "quality; both clear the 15 dB mark across the range. The SI-SDR improvement in "
-                   "the last column is bounded above by the noise present, so at +15 dB input, where "
-                   "there is little left to remove, it necessarily falls and can go negative - that "
-                   "is a property of the metric, not of the output. The low-SNR rows are the "
-                   "interesting ones for a defence scenario.")
+                   "Output SNR is the surviving speech power over the residual noise power, from the "
+                   "mixture-derived gain decomposition. It rises with input SNR because it inherits "
+                   "the input's starting point; the SNR gain column is what the enhancer actually "
+                   "contributes, and that falls as the input gets cleaner because there is less noise "
+                   "left to remove. The SI-SDR improvement in the last column is lower again because "
+                   "it also charges for speech distortion, not just residual noise. The low-SNR rows "
+                   "are the interesting ones for a defence scenario.")
 
     # ---- ablation ------------------------------------------------------------
     ablation = [["Configuration", "n", "PESQ", "STOI", "SI-SDR dB", "sp.atten dB", "Output level dBFS"]]

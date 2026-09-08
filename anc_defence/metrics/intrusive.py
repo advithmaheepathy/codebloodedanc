@@ -122,24 +122,66 @@ def output_snr_db(reference: np.ndarray, test: np.ndarray) -> float:
     return float(10.0 * np.log10(num / den))
 
 
-def residual_noise_snr_db(enhanced_speech: np.ndarray, enhanced_noise: np.ndarray) -> float:
-    """Classical output SNR from separately-enhanced speech and noise tracks.
+def residual_noise_snr_db(
+    clean: np.ndarray,
+    noise: np.ndarray,
+    noisy: np.ndarray,
+    output: np.ndarray,
+    sample_rate: int = 48000,
+    n_fft: int = 960,
+    hop: int = 480,
+    gain_ceiling: float = 4.0,
+) -> float:
+    """Classical output SNR: surviving speech power over residual noise power.
 
-    When the corpus keeps the clean speech and the noise-only track, both can be pushed
-    through the *same* enhancement and the output SNR read directly as
-    ``10*log10(enhanced_speech_power / enhanced_noise_power)``. This is the textbook
-    "speech power over residual noise power" and it needs no projection, so it is the
-    least arguable of the output-SNR definitions. It is only available where a noise-only
-    reference exists (i.e. offline, on the synthesised corpus).
+    Requires the mixture's known components. The enhancer is **non-linear**, so the
+    components cannot simply be enhanced separately: feeding the model a noise-only track
+    with no speech in it makes its own voice-activity reasoning suppress the whole signal,
+    which is nothing like the residual that survives when speech is present to mask it.
+    Doing that yields a figure roughly ``input_snr + 45 dB``, i.e. it measures suppression
+    depth, not output SNR.
+
+    The correct decomposition recovers the effective time-frequency gain the enhancer
+    actually applied to the real mixture and applies that same gain to each component::
+
+        G(t,f) = |Y(t,f)| / |X(t,f)|     from the true mixture X and true output Y
+        speech = G * S,  residual = G * N
+
+    Because the mixture is ``X = S + N`` and G is applied identically to both, the two
+    components sum to the output, so their power ratio is the genuine output SNR. This is
+    the standard filter-based decomposition behind SDR/SIR/SAR.
+
+    Only available offline, where a noise-only reference exists.
     """
-    s, n = match_length(
-        np.asarray(enhanced_speech, dtype=np.float64), np.asarray(enhanced_noise, dtype=np.float64)
+    from scipy.signal import stft
+
+    arrays = match_length(
+        np.asarray(clean, dtype=np.float64),
+        np.asarray(noise, dtype=np.float64),
+        np.asarray(noisy, dtype=np.float64),
+        np.asarray(output, dtype=np.float64),
     )
-    sp = float(np.dot(s, s))
-    npow = float(np.dot(n, n))
-    if sp <= _EPS or npow <= _EPS:
+    if len(arrays[0]) < n_fft:
         return float("nan")
-    return float(10.0 * np.log10(sp / npow))
+
+    def _spec(x: np.ndarray) -> np.ndarray:
+        _, _, Z = stft(
+            x, fs=sample_rate, nperseg=n_fft, noverlap=hop, boundary=None, padded=False
+        )
+        return Z
+
+    S, N, X, Y = (_spec(a) for a in arrays)
+    k = min(S.shape[1], N.shape[1], X.shape[1], Y.shape[1])
+    if k < 2:
+        return float("nan")
+    S, N, X, Y = S[:, :k], N[:, :k], X[:, :k], Y[:, :k]
+
+    gain = np.clip(np.abs(Y) / (np.abs(X) + 1e-10), 0.0, gain_ceiling)
+    speech_power = float(np.sum((gain * np.abs(S)) ** 2))
+    noise_power = float(np.sum((gain * np.abs(N)) ** 2))
+    if speech_power <= _EPS or noise_power <= _EPS:
+        return float("nan")
+    return float(10.0 * np.log10(speech_power / noise_power))
 
 
 def snr_db(reference: np.ndarray, test: np.ndarray) -> float:

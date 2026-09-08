@@ -305,10 +305,6 @@ def evaluate_example(
 
     add("unprocessed", "input", primary)
 
-    # Cache for the residual-noise output SNR: identical for dfn_only and
-    # dfn_then_normalise (normalisation is gain-only), so compute it at most once.
-    _residual_noise_snr: list[Optional[float]] = [None]
-
     for method in runner.methods:
         if method == "unprocessed":
             continue
@@ -345,19 +341,19 @@ def evaluate_example(
         # example, so it is only done for dfn_only (the model's own output SNR, which the
         # delivered pipeline inherits since normalisation is gain-only) and only where the
         # noise-only reference exists.
-        if (
-            method in ("dfn_only", "dfn_then_normalise")
-            and clean is not None
-            and noise_only is not None
-            and runner._model is not None
-        ):
-            if _residual_noise_snr[0] is None:
-                k = min(len(clean), len(noise_only))
-                enh_speech = runner._model.enhance_array(clean[:k], count_time=False)
-                enh_noise = runner._model.enhance_array(noise_only[:k], count_time=False)
-                _residual_noise_snr[0] = residual_noise_snr_db(enh_speech, enh_noise)
-            if np.isfinite(_residual_noise_snr[0]):
-                extra["residual_noise_snr_db"] = float(_residual_noise_snr[0])
+        # Classical output SNR: surviving speech power over residual noise power, via the
+        # gain the enhancer actually applied to the mixture. Valid for any method,
+        # including the classical baselines, since it only needs the mixture components
+        # and the method's own output.
+        if clean is not None and noise_only is not None:
+            rns = residual_noise_snr_db(clean, noise_only, primary, out.output, sr)
+            if np.isfinite(rns):
+                extra["residual_noise_snr_db"] = float(rns)
+                # Classical SNR improvement: output SNR minus the mixture's true input
+                # SNR. Unlike the SI-SDR improvement this does not charge the enhancer for
+                # speech distortion, so the two differ and both are reported.
+                if np.isfinite(measured_input_snr):
+                    extra["snr_gain_db"] = float(rns - measured_input_snr)
 
         add(method, "output", out.output, extra, gain_envelope=out.gain_envelope)
         outputs[method] = (
