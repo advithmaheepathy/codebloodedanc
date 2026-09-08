@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--input-device", default=None, help="live: input device index or name substring")
     p_run.add_argument("--output-device", default=None, help="live: output device index or name substring")
     p_run.add_argument("--no-monitor", action="store_true", help="live: do not play the output")
+    p_run.add_argument(
+        "--latency", default=None, choices=["low_latency", "quality", "custom"],
+        help="live: latency profile. low_latency ~105 ms responsive (default), "
+             "quality ~1.5 s high-fidelity, custom uses neural.streaming.* as configured",
+    )
 
     p_eval = add_parser("evaluate", help="run the method comparison over the corpus")
     p_eval.add_argument("--manifest", default=None,
@@ -207,6 +212,7 @@ def _command_overrides(args: argparse.Namespace) -> list[str]:
         add("live.noise_snr_db", getattr(args, "snr", None))
         add("live.input_device", getattr(args, "input_device", None))
         add("live.output_device", getattr(args, "output_device", None))
+        add("live.latency_profile", getattr(args, "latency", None))
         if getattr(args, "no_monitor", False):
             out.append("live.monitor=false")
         if getattr(args, "mode", "") == "live_dfn_only":

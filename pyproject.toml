@@ -37,7 +37,10 @@ metrics = ["pesq>=0.0.3,<0.0.5"]
 # Only used by the synthetic dataset generator, which the supplied corpus supersedes.
 # Both need a compiler (and libhdf5 for h5py), so they stay out of the core install.
 synth = ["pyroomacoustics>=0.7", "h5py>=3.8"]
-dashboard = ["streamlit>=1.30", "pandas>=1.5"]
+# pandas < 2.2: pandas 3.0 requires matplotlib >= 3.9.3 for its Styler, but the
+# numpy < 2 pin (from deepfilternet) holds matplotlib at 3.9.2. The dashboard uses no
+# Styler features, so an older pandas is both sufficient and avoids the conflict.
+dashboard = ["streamlit>=1.30", "pandas>=1.5,<2.2"]
 dnsmos = ["onnxruntime>=1.15"]
 dev = ["pytest>=7.4"]
 all = [
@@ -45,7 +48,7 @@ all = [
     "pyroomacoustics>=0.7",
     "h5py>=3.8",
     "streamlit>=1.30",
-    "pandas>=1.5",
+    "pandas>=1.5,<2.2",
     "pytest>=7.4",
 ]
 

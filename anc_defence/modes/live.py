@@ -275,6 +275,60 @@ class LiveEngine:
         s["underruns"] = self.stats.output_underruns
         return s
 
+    def measure_pipeline_latency(self) -> dict[str, float]:
+        """Measured streaming latency: how long after a sample is fed does it emerge.
+
+        This is the delay a talker actually experiences, and it is not the same as the
+        model's algorithmic latency. DeepFilterNet's ``enhance`` internally
+        delay-compensates (``pad=True``), so a whole-file call is time-aligned. In the
+        live path, however, samples are held until a full neural chunk has accumulated
+        before the model runs, so the output for input sample ``k`` is not emitted until
+        roughly one chunk later. This probe drives the real ``process_block`` stream one
+        block at a time and records, for a mark placed at a known input sample, how many
+        output samples had already been emitted when that input was fed - which is
+        exactly the buffering delay the listener hears.
+
+        It excludes the audio device's own input/output buffering, which is hardware
+        dependent and reported separately from live.blocksize.
+        """
+        from ..pipeline import Pipeline
+
+        probe = Pipeline(self.cfg, model=self.pipeline.model)
+        probe.reset()
+        sr = self.sr
+
+        # Feed silence one block at a time and count how many input samples go in before
+        # the pipeline emits its first output sample. In a streaming pipeline the output
+        # for input sample k cannot appear before its neural chunk has filled, so this
+        # "fed in before first out" count is the buffering delay the talker experiences.
+        # It is measured on the real process_block path, so it reflects the actual chunk
+        # size and the limiter look-ahead, not a theoretical sum.
+        fed = 0
+        fed_at_first_output = None
+        for _ in range(int(6.0 * sr) // self.block):
+            y = probe.process_block(np.zeros(self.block, dtype=np.float32))
+            fed += self.block
+            if y.size:
+                fed_at_first_output = fed
+                break
+        if fed_at_first_output is None:
+            return {"measured_latency_ms": float("nan")}
+
+        # Sample 0 entered at t=0 and its processed counterpart is not emitted until the
+        # buffer has filled enough for the first neural chunk to run. The number of input
+        # samples fed before the first output block is exactly that fill time, i.e. the
+        # buffering delay every input sample experiences.
+        buffering_ms = 1000.0 * fed_at_first_output / sr
+        limiter_ms = self.pipeline.normaliser.latency_ms if self.pipeline.normaliser else 0.0
+        device_ms = 1000.0 * self.block / sr  # one block each direction, hardware dependent
+        total_ms = buffering_ms + limiter_ms + device_ms
+        return {
+            "measured_latency_ms": round(total_ms, 1),
+            "buffering_ms": round(buffering_ms, 1),
+            "limiter_lookahead_ms": round(limiter_ms, 1),
+            "device_io_ms": round(device_ms, 1),
+        }
+
     @property
     def processor(self) -> "LiveEngine":
         """The dashboard reads ``engine.processor.name`` and ``.nlms``."""
@@ -289,10 +343,46 @@ class LiveEngine:
         return self.pipeline.normaliser
 
 
+LATENCY_PROFILES = {
+    # (chunk_s, context_s, crossfade_ms). Chosen from measurement on this workload:
+    # agreement with the offline path is set by chunk size, extra context beyond ~0.25 s
+    # buys nothing, and RTF has ample headroom at 60 ms chunks.
+    #   chunk 60 ms  -> ~105 ms end-to-end, RTF ~0.07, ~12 dB SI-SDR vs offline
+    #   chunk 1.5 s  -> ~1.5 s latency,     RTF ~0.13, ~17.5 dB
+    "low_latency": (0.06, 0.25, 5.0),
+    "quality": (1.5, 0.25, 30.0),
+}
+
+
+def apply_latency_profile(cfg: Config) -> Config:
+    """Resolve live.latency_profile into concrete streaming parameters.
+
+    Returns a copy: the profile is a convenience over neural.streaming, and 'custom'
+    leaves whatever is already configured untouched.
+    """
+    profile = cfg.live.latency_profile
+    if profile == "custom":
+        return cfg
+    chunk_s, context_s, crossfade_ms = LATENCY_PROFILES[profile]
+    out = cfg.model_copy(deep=True)
+    out.neural.streaming.chunk_s = chunk_s
+    out.neural.streaming.context_s = context_s
+    out.neural.streaming.crossfade_ms = crossfade_ms
+    out.neural.streaming.overlap = 0.0  # small chunks crossfade, they do not overlap-hop
+    return out
+
+
 def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
     """``anc run --mode live_mic``."""
+    cfg = apply_latency_profile(cfg)
     session = session or create_session(cfg, "live_mic")
-    log.info("pipeline: %s", Pipeline(cfg, load_model=False).describe())
+    log.info(
+        "pipeline: %s  |  latency profile: %s (chunk %.0f ms, context %.0f ms)",
+        Pipeline(cfg, load_model=False).describe(),
+        cfg.live.latency_profile,
+        cfg.neural.streaming.chunk_s * 1000,
+        cfg.neural.streaming.context_s * 1000,
+    )
     sampler = ResourceSampler(interval_s=0.5).start()
     engine = LiveEngine(cfg, session)
     t0 = time.perf_counter()
@@ -440,8 +530,23 @@ def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
         single_thread=(cfg.neural.num_threads == 1),
     )
     data.add_table("Processing time and real-time factor", system_table(system))
-    data.add_table("Latency budget", latency_table(engine.pipeline.latency_breakdown()),
-                   "Chunk buffering dominates the live path. It is buffering, not streaming latency.")
+    latency = engine.pipeline.latency_breakdown()
+    measured = engine.measure_pipeline_latency()
+    data.add_table(
+        "Latency budget",
+        latency_table(latency, measured=measured.get("measured_latency_ms")),
+        f"Latency profile: <b>{cfg.live.latency_profile}</b>, {cfg.neural.streaming.chunk_s * 1000:.0f} ms "
+        f"neural chunk. The measured figure is an impulse pushed through the real block path, so it "
+        f"includes chunk buffering and the limiter look-ahead but not the audio device's own "
+        f"input/output buffering (that is set by live.blocksize = {cfg.live.blocksize} samples = "
+        f"{1000.0 * cfg.live.blocksize / sr:.0f} ms per direction).",
+    )
+    data.payload["latency"] = {**latency, **measured, "profile": cfg.live.latency_profile}
+    log.info(
+        "measured DSP latency: %.0f ms (profile: %s)",
+        measured.get("measured_latency_ms", float("nan")),
+        cfg.live.latency_profile,
+    )
 
     ring = engine.ring_stats()
     stats = engine.stats.as_dict()

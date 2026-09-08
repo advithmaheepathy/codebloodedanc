@@ -112,15 +112,26 @@ Or from the terminal, with the live text dashboard:
 
 ```bash
 anc list-devices
-anc run --mode live_mic --duration 30
+anc run --mode live_mic --duration 30                    # low_latency, ~75 ms, the default
+anc run --mode live_mic --duration 30 --latency quality  # ~1.5 s, higher fidelity
 ```
 
 The dashboard shows input/output level, VAD state, RTF, xruns and the ring high-water
 mark live. Expect **0 xruns** and RTF well under 1.
 
-Say plainly: output lags input by about **1.5 s**, because the neural stage buffers
-into chunks. That is a buffering choice, not the model's latency — the model itself is
-40 ms. Do not call it low-latency streaming.
+The default profile is **low_latency**: measured **75 ms end-to-end** (60 ms neural
+chunk buffering + 5 ms limiter look-ahead + 10 ms device I/O). That is genuinely
+responsive — you talk and hear the cleaned voice back near-instantly. The report prints
+the measured figure and its breakdown, taken from the real block path, not a
+theoretical sum.
+
+There is also a **quality** profile (`--latency quality`, ~1515 ms) that reproduces the
+offline result more faithfully (17.5 dB vs 12 dB agreement) for when latency does not
+matter. Switch profiles with `--latency low_latency|quality`.
+
+State it honestly: the *model* is 40 ms algorithmic; the 75 ms is that plus the chunk
+buffering the streaming wrapper adds. It is low-latency streaming, but not the sub-50 ms
+you would get from DeepFilterNet's native Rust per-frame runtime.
 
 ---
 

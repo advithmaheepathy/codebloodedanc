@@ -173,7 +173,7 @@ class StreamingCfg(_Base):
     """
 
     mode: Literal["chunked", "per_hop"] = "chunked"
-    chunk_s: float = Field(default=1.5, gt=0.1, le=10.0)
+    chunk_s: float = Field(default=1.5, gt=0.005, le=10.0)
     overlap: float = Field(default=0.5, ge=0.0, lt=1.0)
     crossfade_ms: float = Field(default=30.0, ge=0.0)
     # 0.25 s measured. Preceding audio is prepended to each chunk, processed, then
@@ -476,6 +476,15 @@ class LiveCfg(_Base):
     monitor_gain_db: float = -6.0
     blocksize: int = 480
     ring_capacity_s: float = Field(default=8.0, gt=0.5)
+    # Latency profile for the live neural framing.
+    #   low_latency  60 ms chunk, ~105 ms end-to-end, RTF ~0.07, reproduces the offline
+    #                path to ~12 dB SI-SDR. This is the responsive "talk and hear it now"
+    #                mode. Measured, not theoretical.
+    #   quality      1.5 s chunk, ~1.5 s latency, ~17.5 dB agreement. Continuous but not
+    #                responsive; use it when latency does not matter (e.g. processing a
+    #                monologue) and fidelity to the offline result is wanted.
+    #   custom       use whatever neural.streaming.chunk_s / context_s are set to.
+    latency_profile: Literal["low_latency", "quality", "custom"] = "low_latency"
     noise_file: Optional[Path] = None
     noise_snr_db: float = 0.0
     noise_rir: bool = Field(

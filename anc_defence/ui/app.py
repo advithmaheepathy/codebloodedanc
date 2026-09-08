@@ -110,6 +110,22 @@ def wav_bytes(x: np.ndarray, sample_rate: int = SR) -> bytes:
     return buf.getvalue()
 
 
+def _round(df, precision: int = 3):
+    """Round float columns for display without pandas Styler.
+
+    pandas Styler.background_gradient imports matplotlib, and pandas 3.0 requires a newer
+    matplotlib than the numpy<2 constraint (from deepfilternet) allows. A plain rounded
+    DataFrame avoids the import entirely.
+    """
+    import pandas as pd
+
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_float_dtype(out[col]):
+            out[col] = out[col].round(precision)
+    return out
+
+
 def player(label: str, x: np.ndarray, note: str = "") -> None:
     st.caption(f"**{label}**" + (f" - {note}" if note else ""))
     if x.size:
@@ -292,12 +308,9 @@ with tab_overview:
                         "output_level_dbfs", "rtf"]
                 df = pd.DataFrame(rows)
                 df = df[[c for c in keep if c in df.columns]]
-                st.dataframe(
-                    df.style.format(precision=3).background_gradient(
-                        subset=[c for c in ("pesq", "stoi") if c in df.columns], cmap="Greens"
-                    ),
-                    use_container_width=True,
-                )
+                # Plain formatting only: pandas' .background_gradient() imports matplotlib
+                # and pandas 3.0 wants a newer matplotlib than the numpy<2 pin allows.
+                st.dataframe(_round(df), use_container_width=True)
                 st.caption(
                     "Quality metrics for the full pipeline are computed on the gain-compensated "
                     "output, so the volume normaliser is not scored for changing level - which is "
@@ -313,7 +326,7 @@ with tab_overview:
                 df = pd.DataFrame(per_cat)
                 cols = [c for c in ("category", "n", "pesq", "stoi", "snr_improvement_db",
                                     "speech_attenuation_db", "noise_reduction_db") if c in df.columns]
-                st.dataframe(df[cols].style.format(precision=3), use_container_width=True)
+                st.dataframe(_round(df[cols]), use_container_width=True)
 
             figures = sorted((session_dir / "figures").glob("*.png"))
             if figures:
