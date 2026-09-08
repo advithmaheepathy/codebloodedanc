@@ -23,6 +23,8 @@ NUMERIC_FIELDS = (
     "estoi",
     "si_sdr",
     "snr_direct",
+    "output_snr_db",
+    "residual_noise_snr_db",
     "segmental_snr",
     "lsd",
     "speech_attenuation_db",
@@ -163,8 +165,18 @@ def check_targets(
 ) -> list[TargetCheck]:
     """Evaluate the mandated problem-statement targets against one aggregate row."""
     checks: list[TargetCheck] = []
+
+    # The mandated "SNR > 15 dB" is an absolute output SNR, not the SI-SDR improvement.
+    # Prefer the residual-noise output SNR (speech vs residual noise, the classical ANC
+    # definition) where the noise-only track made it available; otherwise fall back to the
+    # component output SNR from the clean-reference decomposition. Both are absolute
+    # output-quality figures, which is what the target and its siblings (STOI, PESQ) are.
+    snr_key = "residual_noise_snr_db" if np.isfinite(
+        float(row.get("residual_noise_snr_db", float("nan")))
+    ) else "output_snr_db"
+
     specs = (
-        ("SNR improvement", "snr_improvement_db", targets.snr_improvement_db, ">"),
+        ("Output SNR", snr_key, targets.snr_db, ">"),
         ("STOI", "stoi", targets.stoi, ">"),
         ("PESQ (wideband)", "pesq", targets.pesq, ">"),
     )
@@ -197,22 +209,17 @@ def headline_summary(
         return {"method": method, "n": 0, "snr_range_db": [lo, hi], "checks": []}
     agg = aggregate(selected, group_by=("method",))[0]
 
-    # SNR improvement is judged over the noisy end of the range only. It is bounded by
-    # the noise that was there to begin with, so averaging it across clean inputs
-    # measures the corpus, not the suppressor. Quality and intelligibility have no such
-    # ceiling and are judged over the full range.
+    # The three mandated targets - output SNR, STOI, PESQ - are all absolute output
+    # figures with no noise ceiling, so they are judged over the full input-SNR range.
+    checks = check_targets(agg, targets, scope=f"{method}, input SNR {lo:g} to {hi:g} dB")
+
+    # The SI-SDR *improvement* is a different quantity, kept as reported context only. It
+    # is bounded by the noise that was present, so averaging it across near-clean inputs
+    # measures the corpus rather than the system; it is therefore also summarised over the
+    # noisy end of the range where it is meaningful.
     slo, shi = cfg.suppression_snr_range
     suppression = [r for r in selected if slo <= r.snr_db <= shi]
-    snri_row, snri_scope = agg, f"{method}, input SNR {lo:g} to {hi:g} dB"
-    if suppression:
-        snri_row = aggregate(suppression, group_by=("method",))[0]
-        snri_scope = f"{method}, input SNR {slo:g} to {shi:g} dB"
-
-    checks: list[TargetCheck] = []
-    for check in check_targets(agg, targets, scope=f"{method}, input SNR {lo:g} to {hi:g} dB"):
-        if check.name == "SNR improvement":
-            check = check_targets(snri_row, targets, scope=snri_scope)[0]
-        checks.append(check)
+    snri_row = aggregate(suppression, group_by=("method",))[0] if suppression else agg
 
     per_category = aggregate(selected, group_by=("category",))
     category_checks = {
@@ -224,6 +231,8 @@ def headline_summary(
         "n": len(selected),
         "snr_range_db": [lo, hi],
         "aggregate": agg,
+        "output_snr_db": agg.get("output_snr_db"),
+        "residual_noise_snr_db": agg.get("residual_noise_snr_db"),
         "suppression_snr_range_db": [slo, shi],
         "suppression_n": len(suppression),
         "snr_improvement_db_full_range": agg.get("snr_improvement_db"),

@@ -46,7 +46,12 @@ from .enhance.streaming import DfnModel
 from .metrics.categories import MetricRecord
 from .metrics.erle import erle_summary, noise_reduction_db, rms_reduction
 from .metrics.events import event_local_metrics
-from .metrics.intrusive import compute_intrusive, improvement, mixture_snr_db
+from .metrics.intrusive import (
+    compute_intrusive,
+    improvement,
+    mixture_snr_db,
+    residual_noise_snr_db,
+)
 from .pipeline import Pipeline, PipelineResult
 from .utils.logging import get_logger
 from .utils.timing import TimingRegistry
@@ -300,6 +305,10 @@ def evaluate_example(
 
     add("unprocessed", "input", primary)
 
+    # Cache for the residual-noise output SNR: identical for dfn_only and
+    # dfn_then_normalise (normalisation is gain-only), so compute it at most once.
+    _residual_noise_snr: list[Optional[float]] = [None]
+
     for method in runner.methods:
         if method == "unprocessed":
             continue
@@ -330,6 +339,26 @@ def evaluate_example(
         for tap_name, tap_signal in out.stage_outputs.items():
             if tap_name != f"after_{_final_stage_label(method)}":
                 add(method, tap_name, tap_signal)
+        # Classical output SNR (speech power over residual-noise power) for the neural
+        # method, using the kept clean and noise-only tracks. This is the least arguable
+        # reading of the mandated "SNR > 15 dB" target. It needs two extra model calls per
+        # example, so it is only done for dfn_only (the model's own output SNR, which the
+        # delivered pipeline inherits since normalisation is gain-only) and only where the
+        # noise-only reference exists.
+        if (
+            method in ("dfn_only", "dfn_then_normalise")
+            and clean is not None
+            and noise_only is not None
+            and runner._model is not None
+        ):
+            if _residual_noise_snr[0] is None:
+                k = min(len(clean), len(noise_only))
+                enh_speech = runner._model.enhance_array(clean[:k], count_time=False)
+                enh_noise = runner._model.enhance_array(noise_only[:k], count_time=False)
+                _residual_noise_snr[0] = residual_noise_snr_db(enh_speech, enh_noise)
+            if np.isfinite(_residual_noise_snr[0]):
+                extra["residual_noise_snr_db"] = float(_residual_noise_snr[0])
+
         add(method, "output", out.output, extra, gain_envelope=out.gain_envelope)
         outputs[method] = (
             out

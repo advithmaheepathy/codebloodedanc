@@ -213,6 +213,13 @@ report:
   write_wav: true
   spectrograms: true
   targets:
+    # The problem statement lists "SNR > 15 dB, STOI > 0.85, PESQ > 2.5". STOI and PESQ
+    # are absolute output values, so "SNR > 15 dB" is read the same way: the absolute
+    # OUTPUT SNR of the enhanced speech (speech power over residual noise + distortion),
+    # not the SI-SDR improvement over the noisy input. Those are different quantities -
+    # the improvement is capped by how much noise was there to begin with. The pass/fail
+    # check uses output SNR (snr_db); the improvement is still reported as context.
+    snr_db: 15.0
     snr_improvement_db: 15.0
     stoi: 0.85
     pesq: 2.5

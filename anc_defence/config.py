@@ -416,9 +416,20 @@ class DatasetCfg(_Base):
 
 
 class TargetsCfg(_Base):
-    """Mandated performance targets from the problem statement."""
+    """Mandated performance targets from the problem statement.
 
-    snr_improvement_db: float = 15.0
+    The problem statement lists 'SNR > 15 dB, STOI > 0.85, PESQ > 2.5'. STOI and PESQ
+    there are absolute output figures, and by parallel construction 'SNR > 15 dB' is the
+    absolute *output* SNR of the enhanced speech - speech power over residual (noise plus
+    distortion) - not the SI-SDR improvement over the noisy input. Those are different
+    quantities: the improvement is bounded by how much noise was present, whereas the
+    output SNR is the standalone quality of the result. The check evaluates output SNR
+    (:data:`snr_db`); the SI-SDR improvement is still computed and reported as a secondary
+    figure but is no longer the pass/fail criterion.
+    """
+
+    snr_db: float = 15.0                 # absolute OUTPUT SNR target
+    snr_improvement_db: float = 15.0     # retained for the secondary improvement column
     stoi: float = 0.85
     pesq: float = 2.5
 

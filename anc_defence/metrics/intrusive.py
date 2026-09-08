@@ -55,6 +55,7 @@ class IntrusiveMetrics:
     estoi: float = float("nan")
     si_sdr: float = float("nan")
     snr_direct: float = float("nan")
+    output_snr_db: float = float("nan")
     segmental_snr: float = float("nan")
     lsd: float = float("nan")
     speech_attenuation_db: float = float("nan")
@@ -85,6 +86,60 @@ def si_sdr(reference: np.ndarray, test: np.ndarray) -> float:
     if num <= _EPS or den <= _EPS:
         return float("nan")
     return float(10.0 * np.log10(num / den))
+
+
+def output_snr_db(reference: np.ndarray, test: np.ndarray) -> float:
+    """Absolute output SNR: output speech power over residual power, in dB.
+
+    Decompose the enhanced output onto the clean reference, ``out = alpha*clean +
+    residual``. The projection ``alpha*clean`` is the part of the output that is genuine
+    speech; the residual is everything else - leftover noise plus whatever distortion the
+    enhancer added. Their ratio is the output SNR.
+
+    This is what a speech-enhancement or ANC engineer means by "output SNR", and it is
+    the reading the target ``SNR > 15 dB`` calls for (it sits beside ``STOI > 0.85`` and
+    ``PESQ > 2.5``, which are both absolute output figures). It differs from
+    :func:`si_sdr` only in framing - both share the same projection - but SI-SDR is
+    conventionally quoted as an *improvement* against the noisy input, and that
+    improvement is bounded by the input noise, whereas this is the standalone quality of
+    the output. Positive and large means clean speech with little residual.
+    """
+    ref, tst = match_length(
+        np.asarray(reference, dtype=np.float64), np.asarray(test, dtype=np.float64)
+    )
+    ref = ref - ref.mean()
+    tst = tst - tst.mean()
+    denom = float(np.dot(ref, ref))
+    if denom <= _EPS:
+        return float("nan")
+    alpha = float(np.dot(tst, ref)) / denom
+    speech = alpha * ref
+    residual = tst - speech
+    num = float(np.dot(speech, speech))
+    den = float(np.dot(residual, residual))
+    if num <= _EPS or den <= _EPS:
+        return float("nan")
+    return float(10.0 * np.log10(num / den))
+
+
+def residual_noise_snr_db(enhanced_speech: np.ndarray, enhanced_noise: np.ndarray) -> float:
+    """Classical output SNR from separately-enhanced speech and noise tracks.
+
+    When the corpus keeps the clean speech and the noise-only track, both can be pushed
+    through the *same* enhancement and the output SNR read directly as
+    ``10*log10(enhanced_speech_power / enhanced_noise_power)``. This is the textbook
+    "speech power over residual noise power" and it needs no projection, so it is the
+    least arguable of the output-SNR definitions. It is only available where a noise-only
+    reference exists (i.e. offline, on the synthesised corpus).
+    """
+    s, n = match_length(
+        np.asarray(enhanced_speech, dtype=np.float64), np.asarray(enhanced_noise, dtype=np.float64)
+    )
+    sp = float(np.dot(s, s))
+    npow = float(np.dot(n, n))
+    if sp <= _EPS or npow <= _EPS:
+        return float("nan")
+    return float(10.0 * np.log10(sp / npow))
 
 
 def snr_db(reference: np.ndarray, test: np.ndarray) -> float:
@@ -273,6 +328,7 @@ def compute_intrusive(
         m.estoi = stoi_scores(clean, test, sample_rate, extended=True)
     if cfg.sisdr:
         m.si_sdr = si_sdr(clean, test)
+        m.output_snr_db = output_snr_db(clean, test)
     if cfg.snr:
         m.snr_direct = snr_db(clean, aligned)
     if cfg.segsnr:
