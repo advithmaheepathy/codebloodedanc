@@ -146,6 +146,7 @@ class SpeechAgc:
 
         self._gain_db = 0.0
         self._speech_level_db: Optional[float] = None
+        self._speech_power: Optional[float] = None
         self._limiter_gain = 1.0
         self._prev_total_gain: Optional[float] = None
         self._peak_db: Optional[float] = None
@@ -162,6 +163,7 @@ class SpeechAgc:
         self._delay = np.zeros(self.lookahead, dtype=np.float32)
         self._gain_db = 0.0
         self._speech_level_db = None
+        self._speech_power = None
         self._limiter_gain = 1.0
         self._prev_total_gain = None
         self._peak_db = None
@@ -226,11 +228,23 @@ class SpeechAgc:
         # and exactly why a naive AGC pumps the noise up in pauses.
         track = (active or not cfg.hold_during_pause) and frame_db > cfg.gate_dbfs
         if track:
-            if self._speech_level_db is None:
-                self._speech_level_db = frame_db
+            # Smooth in the POWER domain, not in dB. Averaging dB values is a geometric
+            # mean, which is pulled down by the quiet parts of the syllabic envelope and
+            # left the AGC's estimate several dB below the active speech level it is
+            # supposed to match, so the output overshot the target. Averaging power and
+            # converting afterwards is an energy mean, which is what an RMS-based active
+            # speech level measurement computes.
+            frame_power = 10.0 ** (frame_db / 10.0)
+            if self._speech_power is None:
+                self._speech_power = frame_power
             else:
-                a = self._level_attack if frame_db > self._speech_level_db else self._level_release
-                self._speech_level_db = a * self._speech_level_db + (1.0 - a) * frame_db
+                a = (
+                    self._level_attack
+                    if frame_power > self._speech_power
+                    else self._level_release
+                )
+                self._speech_power = a * self._speech_power + (1.0 - a) * frame_power
+            self._speech_level_db = 10.0 * float(np.log10(self._speech_power + _EPS))
 
         # 2. Wanted gain from the tracked level.
         if self._speech_level_db is None:

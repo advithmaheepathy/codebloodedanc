@@ -149,6 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--trials", type=int, default=3)
     p_bench.add_argument("--chunk-sizes", default="0.5,1.0,1.5,2.0")
     p_bench.add_argument("--threads", default="1,0", help="torch thread counts; 0 means default")
+    p_bench.add_argument("--contexts", default=None,
+                         help="comma-separated warm-up context lengths in seconds to compare")
     p_bench.add_argument("--input", default=None, help="use this WAV instead of synthetic noise")
 
     p_cal = add_parser("calibrate", help="suggest a reference-channel gain from noise-only audio")
@@ -439,37 +441,48 @@ def cmd_benchmark(cfg: Config, args: argparse.Namespace) -> int:
         )
         print(f"  whole_file  {label:26s} RTF {s.rtf:.4f}  mean {s.mean_ms:7.1f} ms/call")
 
+        contexts = (
+            [float(x) for x in args.contexts.split(",") if x.strip()]
+            if args.contexts
+            else [cfg.neural.streaming.context_s]
+        )
         for chunk_s in chunk_sizes:
-            model.timer._times_ms.clear()
-            model.timer._audio_s = 0.0
-            eq = chunk_equivalence(model, audio, chunk_s, cfg.neural.streaming.overlap,
-                                   cfg.neural.streaming.crossfade_ms, sr)
-            s = model.timer.summary()
-            total_latency = model.info.algorithmic_latency_ms + eq["worst_case_latency_ms"]
-            rows.append(
-                {
-                    "config": f"chunked {chunk_s} s / {label}",
-                    "framing": "chunked",
-                    "threads": model.info.num_threads,
-                    "chunk_s": chunk_s,
-                    "rtf": round(s.rtf, 4),
-                    "mean_ms_per_call": round(s.mean_ms, 2),
-                    "p95_ms": round(s.p95_ms, 2),
-                    "si_sdr_vs_offline_db": round(eq["si_sdr_vs_offline_db"], 2),
-                    "worst_case_latency_ms": round(total_latency, 1),
-                }
-            )
-            print(
-                f"  chunked {chunk_s:4.1f}s {label:26s} RTF {s.rtf:.4f}  "
-                f"agreement {eq['si_sdr_vs_offline_db']:6.1f} dB SI-SDR  "
-                f"latency {total_latency:7.1f} ms"
-            )
+            for context_s in contexts:
+                model.timer._times_ms.clear()
+                model.timer._audio_s = 0.0
+                eq = chunk_equivalence(model, audio, chunk_s, cfg.neural.streaming.overlap,
+                                       cfg.neural.streaming.crossfade_ms, sr, context_s)
+                s = model.timer.summary()
+                total_latency = model.info.algorithmic_latency_ms + eq["worst_case_latency_ms"]
+                rows.append(
+                    {
+                        "config": f"chunked {chunk_s} s ctx {context_s} s / {label}",
+                        "framing": "chunked",
+                        "threads": model.info.num_threads,
+                        "chunk_s": chunk_s,
+                        "context_s": context_s,
+                        "rtf": round(s.rtf, 4),
+                        "mean_ms_per_call": round(s.mean_ms, 2),
+                        "p95_ms": round(s.p95_ms, 2),
+                        "si_sdr_vs_offline_db": round(eq["si_sdr_vs_offline_db"], 2),
+                        "worst_case_latency_ms": round(total_latency, 1),
+                    }
+                )
+                print(
+                    f"  chunked {chunk_s:4.1f}s ctx {context_s:4.2f}s {label:24s} "
+                    f"RTF {s.rtf:.4f}  agreement {eq['si_sdr_vs_offline_db']:6.1f} dB  "
+                    f"latency {total_latency:7.1f} ms"
+                )
 
     path = write_csv(session.root / "benchmark.csv", rows)
     print(f"\nwrote {path}")
     print(
-        "\nAgreement is SI-SDR of the chunked output against the whole-file output on the same input.\n"
-        "Above ~20 dB the chunked path is audibly indistinguishable from the reference path.\n"
+        "\nAgreement is SI-SDR of the chunked output against the whole-file output on the same\n"
+        "input: it is how closely the live framing reproduces the reference inference path, not a\n"
+        "quality score. 18 dB corresponds to about 12% RMS difference. No perceptual threshold is\n"
+        "claimed here; that would need a listening test.\n"
+        "The gain from a non-zero context is the model's recurrent state being warm rather than\n"
+        "reset at every chunk boundary.\n"
         "All figures measured on this host only; no claim is made about other hardware."
     )
     return 0

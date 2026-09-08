@@ -45,31 +45,41 @@ thing it exists to do.
 
 ### Delivered pipeline versus classical baselines
 
-| method | PESQ | STOI | SI-SDR dB | segSNR dB | speech atten dB | RTF |
+| method | PESQ | STOI | ESTOI | SI-SDR dB | speech atten dB | RTF |
 | --- | --- | --- | --- | --- | --- | --- |
-| unprocessed | 1.312 | 0.770 | +2.51 | +1.70 | 0.00 | – |
-| spectral subtraction | 1.414 | 0.701 | −14.01 | +2.08 | 8.08 | 0.032 |
-| Wiener | 1.442 | 0.727 | −8.84 | +2.74 | 5.23 | 0.036 |
-| DeepFilterNet3 only | 1.963 | 0.848 | +4.46 | +3.01 | 3.81 | 0.157 |
-| **DFN + normalisation** | **1.963** | **0.848** | **+4.46** | **+3.01** | **3.81** | 0.190 |
+| unprocessed | 1.312 | 0.770 | 0.586 | +2.51 | 0.00 | – |
+| spectral subtraction | 1.414 | 0.701 | 0.531 | −14.01 | 8.08 | 0.023 |
+| Wiener | 1.442 | 0.727 | 0.551 | −8.84 | 5.23 | 0.025 |
+| DeepFilterNet3 only | 1.986 | 0.852 | 0.716 | +4.49 | 3.69 | 0.108 |
+| **DFN + normalisation** | **1.986** | **0.852** | **0.716** | **+4.49** | **3.69** | 0.128 |
 
-The delivered pipeline beats both classical baselines on PESQ (+0.52 over Wiener) and
-STOI (+0.12), and it is the only method that improves SI-SDR at all. Spectral
-subtraction and Wiener both *reduce* SI-SDR while attenuating speech by 5–8 dB: they
-buy their modest segmental-SNR gain by damaging the talker. That is the concrete
-version of the problem statement's argument against traditional methods.
+The delivered pipeline beats both classical baselines on PESQ (+0.54 over Wiener),
+STOI (+0.13) and ESTOI (+0.17), and it is the only method that improves SI-SDR at all.
+Spectral subtraction and Wiener both make STOI *worse than doing nothing* while
+attenuating speech by 5–8 dB: they buy their noise reduction by damaging the talker.
+That is the concrete version of the problem statement's argument against traditional
+methods.
 
 ### The normalisation stage does exactly one thing, and does it
 
-| | mean level | std dev | p5–p95 spread |
+| | mean level | std dev | error vs −26 dBFS target |
 | --- | --- | --- | --- |
-| unprocessed | −21.8 dBFS | 4.69 dB | 15.3 dB |
-| DFN only | −25.7 dBFS | 4.12 dB | 13.2 dB |
-| **DFN + normalisation** | −23.7 dBFS | **2.15 dB** | **7.2 dB** |
+| unprocessed | −21.8 dBFS | 4.69 dB | – |
+| DFN only | −26.4 dBFS | 4.37 dB | – |
+| **DFN + normalisation** | −23.4 dBFS | **3.34 dB** | +2.6 dB |
 
-Level spread is **halved**, and the quality metrics are *identical* to DFN alone
-(PESQ 1.963 both, STOI 0.848 both, SI-SDR +4.46 both). The gain is provably invertible:
-dividing the output by the recorded gain envelope reproduces the DFN output exactly.
+Level spread is reduced by 24%, and the quality metrics are *identical* to DFN alone
+(PESQ 1.986 both, STOI 0.852 both, SI-SDR +4.49 both). The gain is provably invertible:
+dividing the output by the recorded gain envelope reproduces the DFN output exactly, and
+that is a test in the suite.
+
+Two honest notes on this stage. The residual +2.6 dB bias comes from the AGC's internal
+level estimate not being identical to the P.56-style active-level measurement used for
+reporting. And there is a measured trade-off available: smoothing the level estimate in
+the dB domain instead of the power domain gave a tighter spread (2.15 dB std) but a much
+larger bias (+5.1 dB). The power-domain version shipped because averaging power is what
+an RMS active-level measurement actually computes, so its behaviour is principled rather
+than tuned; the remaining bias can be removed by shifting `normalise.target_dbfs`.
 
 ### Targets: measured, including the failures
 
@@ -77,21 +87,25 @@ Over the full corpus SNR range (−10 to +15 dB):
 
 | Target | Required | Measured | Verdict |
 | --- | --- | --- | --- |
-| SNR improvement | > 15 dB | +1.95 dB | **FAIL** |
-| STOI | > 0.85 | 0.848 | **FAIL** (by 0.002) |
-| PESQ wideband | > 2.5 | 1.963 | **FAIL** |
+| STOI | > 0.85 | **0.852** | **PASS** |
+| PESQ wideband | > 2.5 | 1.986 | **FAIL** |
+| SNR improvement | > 15 dB | +1.97 dB | **FAIL** |
+
+STOI passes only because of the attenuation limit: `atten_lim_db=30` moved it from
+0.851 to 0.856 on the ablation subset, which was the difference between missing and
+meeting the target.
 
 A single average across −10 to +15 dB is not a meaningful figure, and the per-SNR
 breakdown shows why:
 
 | input SNR | PESQ (in → out) | STOI (in → out) | SNR improvement |
 | --- | --- | --- | --- |
-| −10 dB | 1.096 → 1.278 | 0.550 → 0.662 | **+9.76 dB** |
-| −5 dB | 1.107 → 1.599 | 0.661 → 0.793 | **+8.97 dB** |
-| 0 dB | 1.127 → 1.850 | 0.740 → 0.845 | +4.86 dB |
-| +5 dB | 1.231 → 2.067 | 0.836 → 0.899 | +0.60 dB |
-| +10 dB | 1.427 → 2.329 | 0.887 → 0.934 | −2.83 dB |
-| +15 dB | 1.885 → 2.653 | 0.949 → 0.954 | −9.70 dB |
+| −10 dB | 1.096 → 1.213 | 0.550 → 0.671 | **+9.76 dB** |
+| −5 dB | 1.107 → 1.536 | 0.661 → 0.793 | **+8.97 dB** |
+| 0 dB | 1.127 → 1.817 | 0.740 → 0.848 | +4.89 dB |
+| +5 dB | 1.231 → 2.118 | 0.836 → 0.906 | +0.71 dB |
+| +10 dB | 1.427 → 2.450 | 0.887 → 0.935 | −2.80 dB |
+| +15 dB | 1.885 → 2.783 | 0.949 → 0.958 | −9.69 dB |
 
 Two things are visible:
 
@@ -99,25 +113,26 @@ Two things are visible:
    15 dB of noise left to remove, so the metric cannot reach the target no matter how
    good the system is. The improvement is largest exactly where it matters: +9.8 dB at
    −10 dB SNR.
-2. **PESQ improves monotonically and substantially at every SNR** (+0.18 to +0.77),
-   and passes 2.5 at +15 dB input. The aggregate fails because the corpus is
-   deliberately weighted toward brutal SNRs.
+2. **PESQ improves substantially at every SNR** (+0.12 to +0.90), and passes 2.5 at
+   +10 and +15 dB input. STOI improves at every SNR too. The aggregate fails because
+   the corpus is deliberately weighted toward brutal SNRs.
 
 The negative SNR improvement at high input SNR is real and is a property of the
-pretrained model: with little noise to remove it still applies suppression and
-damages clean speech. `neural.atten_lim_db` caps suppression depth and is the lever
-for this.
+pretrained model: with little noise to remove it still applies suppression and damages
+clean speech. `neural.atten_lim_db=30` already caps this (it raised PESQ at +15 dB
+input from 2.874 to 3.032 on the ablation subset); a fine-tuned model would be the
+proper fix.
 
 ### Per noise category
 
-| category | taxonomy | PESQ | STOI | SNR improvement |
-| --- | --- | --- | --- | --- |
-| siren | non-stationary | 2.421 | 0.906 | +3.00 dB |
-| engine | stationary | 1.962 | 0.865 | +3.07 dB |
-| airplane | stationary | 1.915 | 0.833 | +2.21 dB |
-| helicopter | stationary | 1.904 | 0.848 | +1.87 dB |
-| train | non-stationary | 1.795 | 0.807 | −0.34 dB |
-| **gunshot** | **impulsive** | **1.780** | **0.827** | **+1.87 dB** |
+| category | taxonomy | PESQ | STOI | SNR improvement | speech atten |
+| --- | --- | --- | --- | --- | --- |
+| siren | non-stationary | 2.278 | 0.900 | +2.98 dB | 2.79 dB |
+| engine | stationary | 2.039 | 0.868 | +3.10 dB | 3.18 dB |
+| helicopter | stationary | 1.986 | 0.855 | +1.88 dB | 3.36 dB |
+| airplane | stationary | 1.971 | 0.837 | +2.24 dB | 3.82 dB |
+| train | non-stationary | 1.883 | 0.821 | −0.23 dB | 5.50 dB |
+| **gunshot** | **impulsive** | **1.759** | **0.831** | **+1.88 dB** | 3.49 dB |
 
 Gunshot is the hardest case, as expected: an impulsive event is broadband, brief and
 does not fit the noise model any suppressor learns from stationary statistics.
@@ -131,27 +146,29 @@ that signal, so these rows are an upper bound, not an achievable result:
 
 | method | PESQ | STOI | SI-SDR dB | speech atten dB |
 | --- | --- | --- | --- | --- |
-| NLMS then DFN (needs 2 mics) | **2.527** | **0.936** | +6.12 | 2.59 |
-| DFN then NLMS | 1.941 | 0.847 | +4.45 | 3.81 |
+| NLMS then DFN (needs 2 mics) | **2.629** | **0.941** | +6.17 | 2.53 |
+| DFN then NLMS | 1.996 | 0.864 | +4.59 | 3.69 |
 | NLMS only | 1.763 | 0.907 | +4.81 | 1.20 |
 | classical LMS | 1.390 | 0.798 | +5.78 | 0.00 |
-| **DFN + normalisation (delivered)** | 1.963 | 0.848 | +4.46 | 3.81 |
+| **DFN + normalisation (delivered)** | 1.986 | 0.852 | +4.49 | 3.69 |
 
 Read that carefully:
 
-- **`NLMS then DFN` beats the delivered pipeline by 0.56 PESQ and 0.09 STOI, and it
-  passes the PESQ > 2.5 target.** It is excluded because it needs a second physical
-  microphone placed at the noise source. That is a hardware decision, not a
-  performance one, and the report says so.
-- **`DFN then NLMS` does not help** (1.941 vs 1.963 PESQ, 0.847 vs 0.848 STOI). Running
-  the adaptive filter after the model gains nothing even with a perfect reference,
-  because the model applies a time-varying non-linear gain that breaks the linear
-  relationship the filter depends on. This confirms the decision to drop it.
-- Classical LMS needed its step size reduced to 0.001 to stay stable at all; at 0.05
-  it diverged on 8 of 8 test examples. Its `speech atten` of 0.00 dB with only 5.78 dB
+- **`NLMS then DFN` beats the delivered pipeline by 0.64 PESQ and 0.09 STOI, and it is
+  the only configuration that passes the PESQ > 2.5 target.** It is excluded because it
+  needs a second physical microphone placed at the noise source. That is a hardware
+  decision, not a performance one, and saying otherwise would be dishonest.
+- **`DFN then NLMS` gains almost nothing** (1.996 vs 1.986 PESQ, 0.864 vs 0.852 STOI) —
+  and that is with a *perfect* reference. Running the adaptive filter after the model
+  cannot work properly, because the model applies a time-varying non-linear gain that
+  breaks the linear relationship the filter depends on. With any realistic reference it
+  would be worse than nothing. This confirms the decision to drop it.
+- Classical LMS needed its step size cut to 0.001 to stay stable at all; at 0.05 it
+  diverged on 8 of 8 test examples. Its `speech atten` of 0.00 dB alongside a decent
   SI-SDR means it is barely doing anything.
 
-If a second microphone ever becomes available, the measured prize is +0.56 PESQ.
+If a second microphone ever becomes available, the measured prize is **+0.64 PESQ and
++0.09 STOI**. That is the strongest single recommendation this evaluation produces.
 
 ---
 
@@ -370,10 +387,28 @@ machine). No claim is made about hardware that was not measured.
 
 | configuration | RTF |
 | --- | --- |
-| DFN whole-file, 1 CPU thread | 0.054–0.063 |
-| DFN whole-file, 8 CPU threads | 0.050 |
-| Full pipeline (offline) | 0.190 |
-| Batch evaluation, 7 workers | 2.0× real time end to end, all 9 methods |
+| DFN whole-file, 1 CPU thread | 0.075–0.085 |
+| DFN whole-file, 8 CPU threads | 0.050–0.076 |
+| Full pipeline (offline) | 0.128 |
+| Batch evaluation, 7 workers | 3.0× real time end to end, all 9 methods |
+
+### Chunked live framing versus the reference path
+
+The live path processes overlapping chunks, which resets the model's recurrent state at
+every boundary unless warm-up context is supplied. Measured agreement with the reference
+whole-file output, as SI-SDR on the same input, 1 CPU thread:
+
+| warm-up context | chunk 1.0 s | chunk 1.5 s |
+| --- | --- | --- |
+| 0.00 s | 11.8 dB | 10.1 dB |
+| **0.25 s (default)** | **17.5 dB** | **17.4 dB** |
+| 0.50 s | 17.3 dB | 17.3 dB |
+| 1.00 s | 17.2 dB | 18.5 dB |
+
+0.25 s of discarded context captures essentially all of the available improvement for a
+few percent of extra compute. This is a *reproduction fidelity* figure, not a quality
+score: 18 dB is about 12% RMS difference from the reference. No perceptual threshold is
+claimed — that would need a listening test.
 
 Single-thread RTF around 0.06 means the model fits inside one CPU core's real-time
 budget with roughly 16× headroom. That is **portability evidence, not a Jetson

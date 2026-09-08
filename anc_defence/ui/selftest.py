@@ -288,24 +288,45 @@ def run_selftest(cfg: Config) -> int:
     checks.append(_run("end-to-end pipeline", check_pipeline))
 
     # --------------------------------------------------------------- data files
-    def check_data() -> tuple[str, str, str]:
+    def check_corpus() -> tuple[str, str, str]:
+        """The supplied corpus is what every reported number is measured on."""
+        from ..dataset.plain import load_plain_corpus
+
+        if not cfg.plain.metadata.is_file():
+            return (
+                WARN,
+                f"{cfg.plain.metadata} not found",
+                "point plain.metadata at the corpus CSV, or use --manifest with a generated dataset",
+            )
+        corpus = load_plain_corpus(cfg.plain, check_files=False)
+        if not corpus.examples:
+            return WARN, "metadata parsed but no examples found", "check the CSV column names"
+        counts = corpus.by_category()
+        biggest = max(counts, key=lambda k: counts[k])
+        share = 100.0 * counts[biggest] / max(1, sum(counts.values()))
+        detail = (
+            f"{len(corpus.examples)} labelled examples, {len(counts)} categories, "
+            f"SNR {min(corpus.snr_values):g}..{max(corpus.snr_values):g} dB "
+            f"({biggest} is {share:.0f}%)"
+        )
+        if corpus.missing:
+            return WARN, detail + f", {len(corpus.missing)} row(s) missing audio", "check the paths"
+        return PASS, detail, ""
+
+    checks.append(_run("supplied corpus", check_corpus))
+
+    def check_synthetic_data() -> tuple[str, str, str]:
+        """The fallback generator's corpora. Optional now the corpus is supplied."""
         from ..dataset.sources import index_noise_dir, load_speech_files
 
         speech = load_speech_files(cfg.dataset.clean_dir)
         noise = index_noise_dir(cfg.dataset.noise_dir)
         total_noise = sum(len(v) for v in noise.values())
         if not speech and not total_noise:
-            return WARN, "no evaluation corpora present", "run `anc fetch-data`"
-        empty = [k for k, v in noise.items() if not v]
-        detail = (
-            f"{len(speech)} speech file(s) from {len({p.parent.name for p in speech})} speaker(s), "
-            f"{total_noise} noise file(s) {({k: len(v) for k, v in noise.items()})}"
-        )
-        if empty or not speech:
-            return WARN, detail + f"; missing: {empty or 'speech'}", "run `anc fetch-data`"
-        return PASS, detail, ""
+            return SKIP, "not present (only needed for `anc build-dataset`)", ""
+        return PASS, f"{len(speech)} speech file(s), {total_noise} noise file(s)", ""
 
-    checks.append(_run("evaluation corpora", check_data))
+    checks.append(_run("synthetic generator data", check_synthetic_data))
 
     # ------------------------------------------------------------------- output
     width = max(len(c.name) for c in checks) + 2

@@ -171,6 +171,22 @@ class StreamingCfg(_Base):
     chunk_s: float = Field(default=1.5, gt=0.1, le=10.0)
     overlap: float = Field(default=0.5, ge=0.0, lt=1.0)
     crossfade_ms: float = Field(default=30.0, ge=0.0)
+    # 0.25 s measured. Preceding audio is prepended to each chunk, processed, then
+    # discarded, so the model's recurrent state is warm for the samples that are kept.
+    # Agreement with the reference whole-file path, as SI-SDR, 1 CPU thread:
+    #   context  chunk 1.0 s   chunk 1.5 s
+    #   0.00 s      11.8 dB       10.1 dB     <- cold state at every boundary
+    #   0.25 s      17.5 dB       17.4 dB     <- default; nearly all of the benefit
+    #   0.50 s      17.3 dB       17.3 dB
+    #   1.00 s      17.2 dB       18.5 dB
+    context_s: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=5.0,
+        description="Preceding audio prepended to each chunk, processed and then discarded, so the "
+        "model's recurrent state is warm before the samples that are kept. Costs compute in "
+        "proportion to context/hop.",
+    )
     offline_framing: Literal["whole_file", "chunked"] = Field(
         default="whole_file",
         description=(

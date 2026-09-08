@@ -80,6 +80,11 @@ neural:
     chunk_s: 1.5
     overlap: 0.5
     crossfade_ms: 30.0
+    # Warm-up context prepended to each chunk and then discarded, so the model's
+    # recurrent state is not reset at every chunk boundary. Measured agreement with the
+    # reference whole-file path (SI-SDR, 1 CPU thread):
+    #   0.00 s -> 10-12 dB     0.25 s -> 17.5 dB     0.50 s -> 17.3 dB     1.00 s -> 18 dB
+    context_s: 0.25
     offline_framing: whole_file   # whole_file = reference inference path for offline runs
 
 # -----------------------------------------------------------------------------

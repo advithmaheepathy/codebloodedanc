@@ -285,15 +285,18 @@ class ChunkedEnhancer:
     overlap: float = 0.5
     crossfade_ms: float = 30.0
     sample_rate: int = 48000
+    context_s: float = 0.5
 
     _buffer: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     _tail: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    _context: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     _primed: bool = False
     chunks_processed: int = 0
 
     def __post_init__(self) -> None:
         self.chunk_samples = max(self.model.info.hop_size, int(round(self.chunk_s * self.sample_rate)))
         self.hop_samples = max(1, int(round(self.chunk_samples * (1.0 - self.overlap))))
+        self.context_samples = max(0, int(round(self.context_s * self.sample_rate)))
         self.ramp_samples = min(
             self.hop_samples, max(0, int(round(self.crossfade_ms * self.sample_rate / 1000.0)))
         )
@@ -321,6 +324,7 @@ class ChunkedEnhancer:
     def reset(self) -> None:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._tail = np.zeros(0, dtype=np.float32)
+        self._context = np.zeros(0, dtype=np.float32)
         self._primed = False
         self.chunks_processed = 0
 
@@ -340,7 +344,18 @@ class ChunkedEnhancer:
         )
 
     def _process_chunk(self, chunk: np.ndarray) -> np.ndarray:
-        y = self.model.enhance_array(chunk)
+        # Prepend previously-seen audio as context so the model's recurrent state is
+        # warm for the samples we keep, then discard the context region from the output.
+        # A cold state at every chunk boundary is what limits agreement with the
+        # reference offline path.
+        if self.context_samples > 0 and self._context.size:
+            context = self._context[-self.context_samples :]
+            y_full = self.model.enhance_array(np.concatenate([context, chunk]))
+            y = y_full[len(context) :]
+        else:
+            y = self.model.enhance_array(chunk)
+        if self.context_samples > 0:
+            self._context = chunk[-self.context_samples :].copy()
         self.chunks_processed += 1
         emit = y[: self.hop_samples].copy()
         if self._primed and self.ramp_samples > 0 and len(self._tail) >= self.ramp_samples:
@@ -359,7 +374,11 @@ class ChunkedEnhancer:
             padded = np.zeros(self.chunk_samples, dtype=np.float32)
             n = min(len(self._buffer), self.chunk_samples)
             padded[:n] = self._buffer[:n]
-            y = self.model.enhance_array(padded)
+            if self.context_samples > 0 and self._context.size:
+                context = self._context[-self.context_samples :]
+                y = self.model.enhance_array(np.concatenate([context, padded]))[len(context) :]
+            else:
+                y = self.model.enhance_array(padded)
             self.chunks_processed += 1
             emit = y[:n].copy()
             if self._primed and self.ramp_samples > 0 and len(self._tail) >= self.ramp_samples:
@@ -429,6 +448,7 @@ def create_enhancer(
         overlap=cfg.streaming.overlap,
         crossfade_ms=cfg.streaming.crossfade_ms,
         sample_rate=sample_rate,
+        context_s=cfg.streaming.context_s,
     )
 
 
@@ -439,6 +459,7 @@ def chunk_equivalence(
     overlap: float = 0.5,
     crossfade_ms: float = 30.0,
     sample_rate: int = 48000,
+    context_s: float = 0.5,
 ) -> dict[str, float]:
     """Compare chunked output against whole-file output on the same input.
 
@@ -455,12 +476,14 @@ def chunk_equivalence(
         overlap=overlap,
         crossfade_ms=crossfade_ms,
         sample_rate=sample_rate,
+        context_s=context_s,
     )
     chunked = enhancer.process_signal(x)
     n = min(len(reference), len(chunked))
     return {
         "chunk_s": chunk_s,
         "overlap": overlap,
+        "context_s": context_s,
         "si_sdr_vs_offline_db": si_sdr(reference[:n], chunked[:n]),
         "worst_case_latency_ms": enhancer.latency_ms,
         "chunks": enhancer.chunks_processed,

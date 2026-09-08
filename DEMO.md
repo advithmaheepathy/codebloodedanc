@@ -63,38 +63,41 @@ Point at three things:
 
 **a. It beats the classical baselines on the same data.**
 
-| method | PESQ | STOI |
-| --- | --- | --- |
-| unprocessed | 1.312 | 0.770 |
-| spectral subtraction | 1.414 | 0.701 |
-| Wiener | 1.442 | 0.727 |
-| **ours** | **1.963** | **0.848** |
+| method | PESQ | STOI | ESTOI |
+| --- | --- | --- | --- |
+| unprocessed | 1.312 | 0.770 | 0.586 |
+| spectral subtraction | 1.414 | 0.701 | 0.531 |
+| Wiener | 1.442 | 0.727 | 0.551 |
+| **ours** | **1.986** | **0.852** | **0.716** |
 
 Both classical methods make STOI *worse* than doing nothing, and both attenuate speech
-by 5–8 dB. They buy noise reduction by damaging the talker.
+by 5–8 dB. They buy noise reduction by damaging the talker. **STOI 0.852 passes the
+0.85 target.**
 
 **b. The improvement is largest where it matters.** Per-SNR table:
 
-| input SNR | PESQ in → out | SNR improvement |
-| --- | --- | --- |
-| −10 dB | 1.096 → 1.278 | **+9.8 dB** |
-| −5 dB | 1.107 → 1.599 | **+9.0 dB** |
-| 0 dB | 1.127 → 1.850 | +4.9 dB |
-| +15 dB | 1.885 → 2.653 | −9.7 dB |
+| input SNR | PESQ in → out | STOI in → out | SNR improvement |
+| --- | --- | --- | --- |
+| −10 dB | 1.096 → 1.213 | 0.550 → 0.671 | **+9.8 dB** |
+| −5 dB | 1.107 → 1.536 | 0.661 → 0.793 | **+9.0 dB** |
+| 0 dB | 1.127 → 1.817 | 0.740 → 0.848 | +4.9 dB |
+| +15 dB | 1.885 → 2.783 | 0.949 → 0.958 | −9.7 dB |
 
 At +15 dB input there is not 15 dB of noise left to remove, so the metric falls by
-construction. The honest headline is the low-SNR regime.
+construction. The honest headline is the low-SNR regime, where the gain is +9.8 dB.
 
-**c. The normaliser halves the level spread at zero quality cost.**
+**c. The normaliser fixes the level at zero quality cost.**
 
-| | std dev of output level |
-| --- | --- |
-| unprocessed | 4.69 dB |
-| DFN only | 4.12 dB |
-| **DFN + normalisation** | **2.15 dB** |
+| | mean level | std dev |
+| --- | --- | --- |
+| unprocessed | −21.8 dBFS | 4.69 dB |
+| DFN only | −26.4 dBFS | 4.37 dB |
+| **DFN + normalisation** | −23.4 dBFS | **3.34 dB** |
 
-PESQ, STOI and SI-SDR are *identical* between DFN-only and the full pipeline. The gain
-is provably invertible, so the stage changes level and nothing else.
+PESQ, STOI and SI-SDR are *identical* between DFN-only and the full pipeline (1.986,
+0.852, +4.49 for both). The gain is provably invertible — there is a test asserting that
+dividing the output by the recorded gain envelope reproduces the DFN output — so the
+stage changes level and nothing else.
 
 ---
 
@@ -151,20 +154,24 @@ anc evaluate --methods all --per-cell 3
 
 | method | PESQ | STOI |
 | --- | --- | --- |
-| NLMS then DFN (**needs 2 mics**) | 2.527 | 0.936 |
-| DFN then NLMS | 1.941 | 0.847 |
-| **DFN + normalisation (delivered)** | 1.963 | 0.848 |
+| NLMS then DFN (**needs 2 mics**) | 2.629 | 0.941 |
+| DFN then NLMS | 1.996 | 0.864 |
+| **DFN + normalisation (delivered)** | 1.986 | 0.852 |
 
-Be straight about this: **the two-microphone design scores better** — 0.56 PESQ better,
-and it passes the PESQ > 2.5 target. It was given the exact noise-only file as its
-reference, sample-aligned, which no single-microphone system can obtain, so that row is
-an upper bound. And `DFN then NLMS` gains nothing (1.941 vs 1.963), because the model
-applies a time-varying non-linear gain that breaks the linear relationship the filter
-depends on.
+Be straight about this: **the two-microphone design scores better** — 0.64 PESQ better,
+and it is the only configuration that passes PESQ > 2.5. It was given the exact
+noise-only file as its reference, sample-aligned, which no single-microphone system can
+obtain, so that row is an upper bound. And `DFN then NLMS` gains almost nothing (1.996
+vs 1.986) even with that perfect reference, because the model applies a time-varying
+non-linear gain that breaks the linear relationship the filter depends on.
 
-The honest framing: we measured both, one is unachievable with one microphone and the
-other does not help, so neither ships. If a second microphone becomes available, the
-measured prize is +0.56 PESQ.
+The honest framing: we measured both. One is unachievable with one microphone, the other
+does not help, so neither ships. If a second microphone becomes available, the measured
+prize is +0.64 PESQ and +0.09 STOI — and that is the strongest recommendation the
+evaluation produces.
+
+Do not claim the single-mic pipeline is better than the two-mic one. It is not. It is
+the one that can actually be built with the hardware available.
 
 ---
 
@@ -194,19 +201,23 @@ Each run writes `sessions/<timestamp>_offline_file/` containing `report.pdf`,
 
 1. **Single microphone, two stages: suppression then level control.** No second mic, no
    adaptive filter, nothing that cannot be built with the hardware in the room.
-2. **+9.8 dB SNR improvement at −10 dB input SNR**, and PESQ improves at every SNR.
-3. **It beats spectral subtraction and Wiener on the same data** — and both of those
-   make intelligibility worse than doing nothing.
-4. **Gunshot is the hardest category and is reported separately** (PESQ 1.780). 88% of
+2. **+9.8 dB SNR improvement at −10 dB input SNR**, and PESQ and STOI improve at every
+   SNR.
+3. **STOI 0.852 passes the mandated 0.85 target**, and it passes because of a measured
+   decision: capping suppression depth at 30 dB moved it from 0.851 to 0.856.
+4. **It beats spectral subtraction and Wiener on the same data** — and both of those
+   make intelligibility *worse* than doing nothing.
+5. **Gunshot is the hardest category and is reported separately** (PESQ 1.759). 88% of
    the corpus is gunshot, so we use a balanced subset rather than letting one class set
    the headline.
-5. **The normaliser is provably transparent**: identical quality metrics, half the
-   level spread.
-6. **Every number is reproducible** with one command, and every session carries its own
+6. **The normaliser is provably transparent**: identical quality metrics, 24% less level
+   spread, and a test that asserts the gain is exactly invertible.
+7. **Every number is reproducible** with one command, and every session carries its own
    config, log and PDF.
-7. **We report the failures.** All three mandated targets fail on the aggregate; the
-   per-SNR breakdown shows the aggregate is the wrong statistic and where the system
-   does deliver.
+8. **We report the failures.** PESQ and SNR improvement miss on the aggregate; the
+   per-SNR breakdown shows why the aggregate is the wrong statistic and where the system
+   does deliver. Several defaults in this repo were changed *because* a measurement
+   contradicted the initial guess — that is in the config comments.
 
 ---
 
@@ -217,9 +228,11 @@ Each run writes `sessions/<timestamp>_offline_file/` containing `report.pdf`,
 - Do not call the live path low-latency. It buffers ~1.5 s. The *model* is 40 ms.
 - Do not quote a Jetson performance figure unless the report in front of you was
   generated on the Jetson. Check the session table's "Jetson hardware" row.
-- Do not present the aggregate SNR improvement (+1.95 dB) as the headline without the
+- Do not present the aggregate SNR improvement (+1.97 dB) as the headline without the
   per-SNR table. It is a ceiling artefact, and hiding that invites the question you
   least want.
+- Do not say the chunked live path is numerically identical to the offline path. It
+  reproduces it to about 17.5 dB SI-SDR, which is measured and stated.
 - Do not claim fullband performance. The corpus is 16 kHz upsampled, so the 8–24 kHz
   band is empty.
 
