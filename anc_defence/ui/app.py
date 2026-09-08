@@ -305,7 +305,7 @@ with tab_overview:
 
                 keep = ["method", "n", "pesq", "stoi", "estoi", "si_sdr", "snr_improvement_db",
                         "segmental_snr", "lsd", "speech_attenuation_db", "noise_reduction_db",
-                        "output_level_dbfs", "rtf"]
+                        "rms_reduction_db", "rms_reduction_pct", "output_level_dbfs", "rtf"]
                 df = pd.DataFrame(rows)
                 df = df[[c for c in keep if c in df.columns]]
                 # Plain formatting only: pandas' .background_gradient() imports matplotlib

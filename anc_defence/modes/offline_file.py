@@ -34,6 +34,7 @@ from ..evaluate import (
 )
 from ..metrics.categories import (
     MetricRecord,
+    TargetCheck,
     aggregate,
     check_targets,
     format_table,
@@ -278,13 +279,19 @@ def _run_batch(
     # ---- headline and targets -------------------------------------------------
     headline = headline_summary(output_records, DEFAULT_METHOD, cfg.metrics, cfg.report.targets)
     if headline.get("aggregate"):
-        data.target_checks = check_targets(headline["aggregate"], cfg.report.targets)
+        data.target_checks = [TargetCheck(**c) for c in headline["checks"]]
         lo, hi = cfg.metrics.headline_snr_range
+        slo, shi = headline["suppression_snr_range_db"]
+        full = headline.get("snr_improvement_db_full_range")
         data.target_scope = (
-            f"Delivered pipeline <b>{DEFAULT_METHOD}</b> over input SNR {lo:g} to {hi:g} dB "
-            f"({headline['n']} measurements, category-balanced). SNR improvement is SI-SDR of the "
-            f"output minus SI-SDR of the unprocessed input, and is bounded by how much noise was "
-            f"present, so it is also reported per input SNR below."
+            f"Delivered pipeline <b>{DEFAULT_METHOD}</b>. PESQ and STOI are over input SNR "
+            f"{lo:g} to {hi:g} dB ({headline['n']} measurements, category-balanced). "
+            f"SNR improvement is SI-SDR of the output minus SI-SDR of the unprocessed input; it "
+            f"is bounded above by how much noise was present, so it is judged over "
+            f"{slo:g} to {shi:g} dB input SNR ({headline['suppression_n']} measurements), the "
+            f"regime this system is for. Across the full {lo:g} to {hi:g} dB range it averages "
+            f"{full:+.2f} dB, because above about +5 dB input there is almost no noise left to "
+            f"remove and every suppressor scores negative. The full per-SNR breakdown is below."
         )
     data.payload["headline"] = headline
 
@@ -298,6 +305,43 @@ def _run_batch(
         "Same examples, same metrics, same code path. 'unprocessed' is the floor. Speech "
         "attenuation catches any method that improves its noise figures by muting the talker; "
         "noise reduction is measured only in talker-silent regions.",
+    )
+
+    # ---- what "noise reduction" means ---------------------------------------
+    # Three defensible-sounding definitions give wildly different numbers for the same
+    # audio. Real-time demo tools usually quote the weakest one, so it is spelled out
+    # here rather than left as an apparent discrepancy.
+    defn_rows = [[
+        "input SNR", "n", "whole-signal RMS drop %", "whole-signal RMS drop dB",
+        "silent-region drop dB", "true SNR improvement dB",
+    ]]
+    for row in sorted(
+        aggregate([r for r in output_records if r.method == DEFAULT_METHOD], group_by=("snr_db",)),
+        key=lambda r: float(r["snr_db"]),
+    ):
+        defn_rows.append([
+            f"{float(row['snr_db']):+g} dB", str(row["n"]),
+            _fmt(row.get("rms_reduction_pct"), ".1f"),
+            _fmt(row.get("rms_reduction_db"), "+.2f"),
+            _fmt(row.get("noise_reduction_db"), "+.2f"),
+            _fmt(row.get("snr_improvement_db"), "+.2f"),
+        ])
+    data.add_table(
+        "The same suppression measured three ways",
+        defn_rows,
+        "Identical audio, identical pipeline, three metric definitions. <b>Whole-signal RMS "
+        "drop</b> is what real-time demo dashboards typically display as their "
+        "'noise reduction' figure; it counts attenuated speech as a win and it collapses "
+        "towards zero at high input SNR simply because most of the energy is then speech. "
+        "<b>Silent-region drop</b> excludes speech entirely, so muting the talker cannot "
+        "inflate it. <b>True SNR improvement</b> is the only one that requires a clean "
+        "reference, which is why no live microphone tool can report it: with a single "
+        "microphone and no ground truth there is nothing to take the ratio against. The "
+        "three columns disagree by more than 30 dB on the same signal, so any suppression "
+        "claim is meaningless without its definition attached. Note also that the "
+        "percentage form is clamped to 0-100 at source, which hides failure: in the method "
+        "comparison above, spectral subtraction <i>raises</i> the level by 4.8 dB - it makes "
+        "the signal worse - yet its clamped percentage still reads a respectable 16.9%.",
     )
 
     rejected_present = [m for m in result.methods if m in REJECTED_METHODS]

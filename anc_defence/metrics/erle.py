@@ -59,6 +59,35 @@ def erle_summary(
     return out
 
 
+def rms_reduction(before: np.ndarray, after: np.ndarray) -> dict[str, float]:
+    """Overall RMS drop across the whole signal, speech included.
+
+    This is deliberately the *weak* definition of noise reduction, and it is here only
+    so this project can be compared against tools that quote it. The reference
+    implementation in ``model/deepfilter-anc-main/server.py`` reports exactly this::
+
+        nr = max(0.0, min(100.0, (1.0 - output_rms / input_rms) * 100.0))
+
+    It flatters any suppressor, because attenuating the *speech* raises it just as much
+    as removing noise does, and it has no clean reference so it cannot tell the two
+    apart. It also saturates: at high input SNR almost all of the energy is speech, so
+    the figure collapses towards zero even when the noise is gone. Quote
+    :func:`noise_reduction_db` and ``snr_improvement_db`` instead; this is for
+    like-for-like comparison only.
+    """
+    b = np.asarray(before, dtype=np.float64)
+    a = np.asarray(after, dtype=np.float64)
+    n = min(len(b), len(a))
+    rb = float(np.sqrt(np.mean(b[:n] ** 2))) if n else 0.0
+    ra = float(np.sqrt(np.mean(a[:n] ** 2))) if n else 0.0
+    if rb <= 1e-9:
+        return {"rms_reduction_db": float("nan"), "rms_reduction_pct": float("nan")}
+    return {
+        "rms_reduction_db": float(20.0 * np.log10(rb / max(ra, 1e-12))),
+        "rms_reduction_pct": float(max(0.0, min(100.0, (1.0 - ra / rb) * 100.0))),
+    }
+
+
 def noise_reduction_db(
     before: np.ndarray, after: np.ndarray, noise_mask: np.ndarray
 ) -> float:

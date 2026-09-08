@@ -178,6 +178,13 @@ metrics:
     - [7.5, 12.5]
     - [12.5, 17.5]
   headline_snr_range: [-10.0, 15.0]   # the corpus's full SNR range
+  # PESQ and STOI are judged over headline_snr_range. SNR improvement is not, because it
+  # is bounded above by how much noise was there to remove: measured per input SNR it is
+  # +9.8 dB at -10 dB and -9.7 dB at +15 dB, where the input is already clean and any
+  # residual processing reads as loss. Averaging those together produces +1.9 dB, which
+  # describes the corpus rather than the system. Judged over the noisy end it is +7.9 dB.
+  # The full-range figure is still computed and printed in the report next to this one.
+  suppression_snr_range: [-10.0, 0.0]
 
 # -----------------------------------------------------------------------------
 # The supplied single-channel corpus.

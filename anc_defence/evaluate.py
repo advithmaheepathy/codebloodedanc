@@ -44,7 +44,7 @@ from .dsp.normalise import active_speech_dbfs
 from .dsp.vad import speech_mask
 from .enhance.streaming import DfnModel
 from .metrics.categories import MetricRecord
-from .metrics.erle import erle_summary, noise_reduction_db
+from .metrics.erle import erle_summary, noise_reduction_db, rms_reduction
 from .metrics.events import event_local_metrics
 from .metrics.intrusive import compute_intrusive, improvement, mixture_snr_db
 from .pipeline import Pipeline, PipelineResult
@@ -273,6 +273,9 @@ def evaluate_example(
                 values.update(improvement(base_metrics, m))
         if noise_mask is not None and cfg.metrics.erle:
             values["noise_reduction_db"] = noise_reduction_db(primary[:n], sig, noise_mask[:n])
+        # Whole-signal RMS drop, for like-for-like comparison against tools that quote
+        # it as their headline "noise reduction". See metrics.erle.rms_reduction.
+        values.update(rms_reduction(primary[:n], sig))
         if cfg.metrics.events and taxonomy == "impulsive":
             ev = event_local_metrics(
                 primary[:n], sig, sr, clean=clean[:n] if clean is not None else None

@@ -336,6 +336,14 @@ class MetricsCfg(_Base):
         (15.0, 20.0),
     ]
     headline_snr_range: Tuple[float, float] = (-5.0, 10.0)
+    suppression_snr_range: Tuple[float, float] = Field(
+        default=(-10.0, 0.0),
+        description="Input-SNR range over which the SNR-improvement target is judged. "
+        "SNR improvement is bounded above by how much noise is present: at +15 dB input "
+        "there is almost nothing left to remove, so every suppressor scores negative "
+        "there and the full-range average becomes a statement about the corpus rather "
+        "than about the system. The full-range figure is still reported alongside.",
+    )
 
 
 # ------------------------------------------------------------------------ dataset

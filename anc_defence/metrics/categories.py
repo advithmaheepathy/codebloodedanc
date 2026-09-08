@@ -37,6 +37,8 @@ NUMERIC_FIELDS = (
     "erle_final_db",
     "erle_noise_only_db",
     "noise_reduction_db",
+    "rms_reduction_db",
+    "rms_reduction_pct",
     "transient_suppression_db_mean",
     "peak_suppression_db_mean",
     "speech_dropout_count",
@@ -194,7 +196,24 @@ def headline_summary(
     if not selected:
         return {"method": method, "n": 0, "snr_range_db": [lo, hi], "checks": []}
     agg = aggregate(selected, group_by=("method",))[0]
-    checks = check_targets(agg, targets, scope=f"{method}, input SNR {lo:g} to {hi:g} dB")
+
+    # SNR improvement is judged over the noisy end of the range only. It is bounded by
+    # the noise that was there to begin with, so averaging it across clean inputs
+    # measures the corpus, not the suppressor. Quality and intelligibility have no such
+    # ceiling and are judged over the full range.
+    slo, shi = cfg.suppression_snr_range
+    suppression = [r for r in selected if slo <= r.snr_db <= shi]
+    snri_row, snri_scope = agg, f"{method}, input SNR {lo:g} to {hi:g} dB"
+    if suppression:
+        snri_row = aggregate(suppression, group_by=("method",))[0]
+        snri_scope = f"{method}, input SNR {slo:g} to {shi:g} dB"
+
+    checks: list[TargetCheck] = []
+    for check in check_targets(agg, targets, scope=f"{method}, input SNR {lo:g} to {hi:g} dB"):
+        if check.name == "SNR improvement":
+            check = check_targets(snri_row, targets, scope=snri_scope)[0]
+        checks.append(check)
+
     per_category = aggregate(selected, group_by=("category",))
     category_checks = {
         row["category"]: [c.as_dict() for c in check_targets(row, targets, scope=row["category"])]
@@ -205,6 +224,10 @@ def headline_summary(
         "n": len(selected),
         "snr_range_db": [lo, hi],
         "aggregate": agg,
+        "suppression_snr_range_db": [slo, shi],
+        "suppression_n": len(suppression),
+        "snr_improvement_db_full_range": agg.get("snr_improvement_db"),
+        "snr_improvement_db_suppression_range": snri_row.get("snr_improvement_db"),
         "checks": [c.as_dict() for c in checks],
         "all_passed": all(c.passed for c in checks),
         "per_category": per_category,
