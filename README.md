@@ -193,26 +193,71 @@ Two pins that matter:
 
 ### Jetson Orin NX
 
+Verified against the actual target board:
+
+| | |
+| --- | --- |
+| L4T | R35.5.0 → **JetPack 5.1.3** (`nvidia-jetpack 5.1.3-b29`) |
+| Board | NVIDIA Orin NX Developer Kit, 8× Cortex-A78AE, 15 GB usable |
+| OS / Python | Ubuntu 20.04, **Python 3.8.10** |
+| Power mode | MAXN (mode 0) |
+| Capture hardware | **none attached** — see below |
+
 ```bash
 bash scripts/install_jetson.sh
+anc -c configs/default.yaml -c configs/jetson.yaml selftest
+anc -c configs/default.yaml -c configs/jetson.yaml evaluate --methods delivered
 ```
 
-The script detects L4T from `/etc/nv_tegra_release`, maps it to a JetPack release,
-installs the system packages, and installs the **NVIDIA** PyTorch wheel for that
-release. It will not install torch from PyPI: on a Jetson that gets you a wheel
-without CUDA and is the most common way to break the environment. Every privileged
-step is printed before it runs, and `nvpmodel`/`jetson_clocks` are printed as
-recommendations rather than executed.
+Four things about this board specifically:
 
-The core dependency set is deliberately compilation-free on aarch64 — `deepfilternet`
-and `DeepFilterLib` both ship `manylinux_2_28_aarch64` wheels for cp38–cp311.
-`pesq` (needs a C compiler) and `pyroomacoustics`/`h5py` (compiler, plus libhdf5) are
-optional extras, so a minimal board install needs no build toolchain.
+**Python 3.8 is a hard constraint on the code, not just the deps.** `from __future__
+import annotations` defers annotation evaluation for functions, but **pydantic evaluates
+model field annotations at runtime**, so `list[str]` in a config field raises
+`TypeError: 'type' object is not subscriptable` on 3.8. Every field in `config.py` uses
+`typing.List`/`Tuple` for that reason, and `tests/test_py38_compat.py` scans the AST to
+keep it that way — it fails on the development machine rather than on the board.
 
-Then use the overlay:
+**PyTorch comes from NVIDIA, never PyPI.** The install script uses the wheel verified to
+exist for this release:
+
+```
+https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/
+  torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl
+```
+
+`cp38` matches the board's Python, and torch 2.1.0 is conveniently below the 2.6 change
+to `torch.load(weights_only=...)` that breaks the DeepFilterNet checkpoint.
+
+**torchaudio has no matching wheel**, and `deepfilternet` imports it at module load
+(`df/io.py`) even though it never calls it on the inference path — this project does all
+file I/O through soundfile and resampling through soxr. The script therefore tries, in
+order: an existing install, a source build at the matching tag (20–40 min), and finally
+`scripts/torchaudio_shim.py`, an import-only shim where **every stubbed function raises**
+rather than returning plausible-looking wrong data. `anc selftest` reports when the shim
+is active so it can never be mistaken for the real thing. Force it with
+`TORCHAUDIO_MODE=shim bash scripts/install_jetson.sh`.
+
+**There is no microphone attached.** `arecord -l` on this board lists only
+`APE / tegra-dlink XBAR-ADMAIF` entries, which are Tegra's internal audio DMA channels,
+not capture hardware. Live microphone mode needs a USB mic or headset plugged in.
+Everything else — offline evaluation, the dashboard, the PDF report — runs with no audio
+hardware at all.
+
+The core dependency set is deliberately compilation-free on aarch64: `deepfilternet` and
+`DeepFilterLib` both ship `manylinux_2_28_aarch64` wheels for cp38–cp311, and Ubuntu
+20.04's glibc 2.31 satisfies `manylinux_2_28`. `pesq` (needs a C compiler) and
+`pyroomacoustics`/`h5py` (compiler plus libhdf5) are optional extras.
+
+Every privileged step is printed before it runs, and `nvpmodel -m 0` / `jetson_clocks`
+are printed as recommendations rather than executed — `tests/test_install_script.py`
+asserts that, heredoc-aware so it can tell printing from running.
+
+Two values in `configs/jetson.yaml` are marked `TUNE` and should be re-derived from the
+board rather than trusted from the x86 host:
 
 ```bash
-anc -c configs/default.yaml -c configs/jetson.yaml evaluate --methods delivered
+anc -c configs/default.yaml -c configs/jetson.yaml benchmark --threads 1,4,6,8
 ```
 
 ---

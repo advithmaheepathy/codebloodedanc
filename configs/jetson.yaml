@@ -3,39 +3,58 @@
 #
 #   anc -c configs/default.yaml -c configs/jetson.yaml evaluate
 #
-# Only the values that need to differ on the board are listed; everything else is
-# inherited from default.yaml.
+# Written against the actual target board, not a guess:
 #
-# Rationale for each choice is stated so it can be revisited with measurements from
-# the board rather than guesswork.
+#   L4T R35.5.0  ->  JetPack 5.1.3 (nvidia-jetpack 5.1.3-b29)
+#   NVIDIA Orin NX Developer Kit, 8x Cortex-A78AE, 15 GB usable RAM
+#   Ubuntu 20.04, Python 3.8.10  (this is why the pydantic models avoid list[...]:
+#                                 pydantic evaluates field annotations at runtime and
+#                                 builtin generics raise on 3.8)
+#   Power mode: MAXN (mode 0) already set
+#   Capture hardware: NONE attached. `arecord -l` lists only the APE / tegra-dlink
+#                     XBAR-ADMAIF DMA channels, which are not microphones. Live mic
+#                     mode needs a USB mic or headset plugged in; everything else
+#                     (offline evaluation, dashboard, PDF report) works without it.
+#
+# torch for this board: torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl
+# from https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/
+# 2.1.0 also avoids the torch>=2.6 weights_only change that breaks checkpoint loading.
+#
+# Only values that need to differ on the board are listed; the rest is inherited.
+# Re-derive the two marked TUNE lines from `anc benchmark` run on the board.
 # =============================================================================
 
 run:
   log_level: INFO
 
 neural:
-  # DeepFilterNet3 is 2.1M parameters and runs per 10 ms frame. On x86 the CPU path
-  # measured RTF 0.05-0.06 single-threaded, and eight threads only reached 0.05, so
-  # the workload is latency bound rather than throughput bound. A tiny recurrent model
-  # like this is usually dominated by kernel-launch overhead on a GPU, so CPU is the
-  # starting point. Run `anc benchmark` on the board and switch to cuda only if it
-  # actually wins.
+  # TUNE. DeepFilterNet3 is 2.1M parameters running per 10 ms frame. On x86 the CPU path
+  # measured RTF 0.075-0.085 single-threaded, and eight threads only reached 0.050-0.076,
+  # so the workload is latency bound rather than throughput bound. A model this small is
+  # usually dominated by kernel-launch overhead on a GPU, so CPU is the starting point
+  # even though this board has CUDA. Confirm with:
+  #     anc -c configs/default.yaml -c configs/jetson.yaml benchmark --threads 1,4,6,8
+  # and only switch to cuda if it measurably wins.
   device: cpu
-  # Orin NX has 8 Cortex-A78AE cores. Leaving two for the audio callback and the OS.
+  # 8 A78AE cores; leaving two for the audio callback, the OS and the dashboard.
   num_threads: 6
   streaming:
-    # Smaller chunks cut the live-path buffering latency. Verify the quality cost on
-    # the board with `anc benchmark --chunk-sizes 0.5,1.0,1.5`.
+    # Smaller chunks cut live-path buffering latency. The quality cost is measurable:
+    # check the agreement column of `anc benchmark --chunk-sizes 0.5,1.0,1.5`.
     chunk_s: 1.0
+    # Keep the warm-up context: without it the chunked path only reproduces the
+    # reference output to 10-12 dB SI-SDR instead of 17.5 dB.
+    context_s: 0.25
 
 offline:
-  # Each worker holds its own model instance. Four workers on a 16 GB board is
-  # comfortable; raise it after checking peak RSS in the report.
+  # TUNE. Each worker process holds its own model instance (~250 MB resident). Four on a
+  # 15 GB board with ~10 GB free is comfortable. Check peak_rss_mb in the report before
+  # raising it.
   workers: 4
 
 plain:
-  # Fewer examples per cell so an evaluation finishes quickly on the board. The
-  # x86 numbers are the reference; this is for confirming the board agrees.
+  # Fewer examples per cell so an evaluation finishes quickly on the board. The x86
+  # numbers are the reference result; this is for confirming the board agrees with them.
   per_cell: 3
   max_duration_s: 10.0
 
@@ -43,12 +62,17 @@ report:
   dpi: 100
 
 live:
-  # USB audio interfaces are commonly happier with a slightly larger block.
+  # Nothing to record from until a USB microphone is attached. `anc list-devices` will
+  # show it once it is; select it by name substring rather than index, because the index
+  # shifts when USB devices are re-enumerated.
+  input_device: null
   blocksize: 480
+  # A larger ring absorbs scheduling jitter from the governor and from tegrastats.
   ring_capacity_s: 12.0
 
 metrics:
-  # PESQ needs a compiler on aarch64. If `pip install .[metrics]` failed, set this to
-  # false and the report will show PESQ as unavailable rather than failing the run.
+  # pesq compiles from source on aarch64 and needs python3-dev plus a C compiler, both
+  # installed by scripts/install_jetson.sh. If the build failed, set this to false and
+  # the report shows PESQ as unavailable rather than failing the run.
   pesq: true
   dnsmos: false

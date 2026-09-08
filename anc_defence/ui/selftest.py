@@ -100,6 +100,27 @@ def run_selftest(cfg: Config) -> int:
 
     checks.append(_run("torch", check_torch))
 
+    def check_torchaudio() -> tuple[str, str, str]:
+        """Report honestly whether this is real torchaudio or our import-only shim."""
+        try:
+            import torchaudio
+        except Exception as exc:
+            return (
+                FAIL,
+                f"not importable: {type(exc).__name__}: {exc}",
+                "deepfilternet imports it at module load; run scripts/torchaudio_shim.py --install",
+            )
+        if getattr(torchaudio, "IS_ANC_DEFENCE_SHIM", False):
+            return (
+                WARN,
+                "import-only SHIM active, not real torchaudio",
+                "fine for this pipeline (nothing calls torchaudio on the inference path); "
+                "every shimmed function raises if it ever is called",
+            )
+        return PASS, f"torchaudio {getattr(torchaudio, '__version__', '?')}", ""
+
+    checks.append(_run("torchaudio", check_torchaudio))
+
     # -------------------------------------------------------------- model load
     model = None
 

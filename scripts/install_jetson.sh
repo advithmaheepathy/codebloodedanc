@@ -47,7 +47,11 @@ else
   L4T_MINOR=""
 fi
 
-[ -f /proc/device-tree/model ] && echo "  model: $(tr -d '\0' < /proc/device-tree/model)"
+# Note: `[ test ] && echo ...` would abort the script under `set -e` whenever the test
+# is false, because the whole list then returns non-zero. Use explicit if blocks.
+if [ -f /proc/device-tree/model ]; then
+  echo "  model: $(tr -d '\0' < /proc/device-tree/model)"
+fi
 echo "  python: $($PY --version 2>&1)"
 echo "  memory: $(free -g | awk '/^Mem:/ {print $2" GB"}')"
 
@@ -56,9 +60,17 @@ JP=""
 TORCH_INDEX=""
 case "$L4T_MAJOR" in
   32) JP="4.x" ;;
-  35) JP="5.1.x"; TORCH_INDEX="https://pypi.jetson-ai-lab.dev/jp5/cu114" ;;
-  36) JP="6.x";   TORCH_INDEX="https://pypi.jetson-ai-lab.dev/jp6/cu126" ;;
-  38) JP="7.x";   TORCH_INDEX="https://pypi.jetson-ai-lab.dev/jp7/cu130" ;;
+  35) JP="5.1.x"
+      # Verified to exist for L4T R35.5.0 / JetPack 5.1.3 / Python 3.8 (cp38).
+      # torch 2.1.0 also sidesteps the torch>=2.6 weights_only change that breaks
+      # loading the DeepFilterNet checkpoint.
+      TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl"
+      TORCHAUDIO_TAG="v2.1.0"
+      ;;
+  36) JP="6.x"
+      TORCH_INDEX="${TORCH_INDEX:-https://pypi.jetson-ai-lab.io/jp6/cu126}"
+      TORCHAUDIO_TAG="v2.4.0"
+      ;;
   *)  JP="unknown" ;;
 esac
 echo "  L4T R${L4T_MAJOR:-?}.${L4T_MINOR:-?}  ->  JetPack ${JP}"
@@ -82,9 +94,10 @@ else
   echo "  and building the pesq extension (python3-dev, build-essential)"
   run_sudo apt-get update
   run_sudo apt-get install -y --no-install-recommends \
-    build-essential python3-dev python3-venv python3-pip \
+    build-essential cmake ninja-build python3-dev python3-venv python3-pip \
     libsndfile1 libportaudio2 portaudio19-dev libasound2-dev \
-    ffmpeg libopenblas-dev git
+    ffmpeg git \
+    libopenblas-dev libopenmpi-dev libomp-dev
 fi
 
 # -------------------------------------------------------------- 3. environment
@@ -116,25 +129,77 @@ if torch.cuda.is_available():
 PYEOF
 else
   log "Installing PyTorch for JetPack ${JP}"
-  if [ -z "$TORCH_INDEX" ]; then
-    die "No wheel index known for this JetPack. Find the wheel for your release at
-  https://developer.nvidia.com/embedded/downloads  or  https://pypi.jetson-ai-lab.dev
-then re-run with:  TORCH_INDEX=<url> bash scripts/install_jetson.sh
-Do NOT 'pip install torch' from PyPI on a Jetson: you will get a wheel without CUDA."
-  fi
-  echo "  index: $TORCH_INDEX"
-  if ! "$VPY" -m pip install --index-url "$TORCH_INDEX" torch torchaudio; then
-    die "PyTorch install failed from $TORCH_INDEX.
-Alternatives, in order of preference:
-  1. Use the NGC container: nvcr.io/nvidia/l4t-pytorch matching your L4T release.
-  2. Download the wheel from https://developer.nvidia.com/embedded/downloads and
-     install it with: $VPY -m pip install ./torch-*.whl
-  3. Install the JetPack system package and re-run this script: the venv was created
-     with --system-site-packages so a system torch will be picked up.
-CPU-only operation is also viable: this workload measured RTF 0.05-0.06 on a single
-x86 CPU thread. Set neural.device=cpu and continue."
+  if [ -n "${TORCH_URL:-}" ]; then
+    echo "  wheel: $TORCH_URL"
+    if ! "$VPY" -m pip install "$TORCH_URL"; then
+      cat >&2 <<'HELP'
+PyTorch install failed. Alternatives, in order of preference:
+  1. Download the wheel by hand from
+     https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/
+     then: .venv/bin/python -m pip install ./torch-*.whl
+  2. Use the NGC container nvcr.io/nvidia/l4t-pytorch matching your L4T release.
+  3. Install the JetPack system torch and re-run: the venv was created with
+     --system-site-packages so a system torch is picked up automatically.
+Never 'pip install torch' from PyPI on a Jetson: that wheel has no CUDA.
+HELP
+      die "see the options above"
+    fi
+  elif [ -n "${TORCH_INDEX:-}" ]; then
+    echo "  index: $TORCH_INDEX"
+    "$VPY" -m pip install --index-url "$TORCH_INDEX" torch || die "PyTorch install failed from $TORCH_INDEX"
+  else
+    die "No wheel known for this JetPack. Set one explicitly:
+  TORCH_URL=<url-to-wheel> bash scripts/install_jetson.sh
+Find it at https://developer.download.nvidia.com/compute/redist/jp/"
   fi
 fi
+
+# ---------------------------------------------------------------- 4b. torchaudio
+# deepfilternet imports torchaudio at module load (df/io.py) but never calls it on the
+# inference path: this project does all file I/O through soundfile and resampling
+# through soxr. NVIDIA ships no torchaudio wheel alongside the JetPack 5.1.x torch
+# build, so this tries the cheap options before the expensive one.
+log "Resolving torchaudio (needed for the import, not for inference)"
+if "$VPY" -c 'import torchaudio' 2>/dev/null; then
+  echo "  already importable: $("$VPY" -c 'import torchaudio; print(torchaudio.__version__)')"
+elif [ "${TORCHAUDIO_MODE:-auto}" = "shim" ]; then
+  echo "  TORCHAUDIO_MODE=shim requested"
+  "$VPY" scripts/torchaudio_shim.py --install
+else
+  echo "  attempting a source build at ${TORCHAUDIO_TAG:-v2.1.0} (this can take 20-40 minutes)"
+  echo "  set TORCHAUDIO_MODE=shim to skip the build and use the import-only shim instead"
+  export BUILD_SOX=0 BUILD_KALDI=0 BUILD_RNNT=0 USE_FFMPEG=0
+  if "$VPY" -m pip install --no-build-isolation \
+      "git+https://github.com/pytorch/audio.git@${TORCHAUDIO_TAG:-v2.1.0}"; then
+    echo "  torchaudio built from source"
+  else
+    warn "torchaudio source build failed. Falling back to the import-only shim."
+    warn "Every shimmed function raises if called, so nothing can silently go wrong."
+    "$VPY" scripts/torchaudio_shim.py --install || die "shim install failed too"
+  fi
+fi
+
+# Prove the combination actually works before going any further.
+log "Verifying torch + deepfilternet"
+"$VPY" - <<'PYEOF' || die "torch/deepfilternet verification failed: fix this before continuing"
+import warnings
+warnings.filterwarnings("ignore")
+import torch
+print(f"  torch {torch.__version__}")
+print(f"  CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"  device: {torch.cuda.get_device_name(0)}")
+else:
+    print("  CPU only. This workload measured RTF 0.075-0.085 single-threaded on x86,")
+    print("  so CPU operation is viable; set neural.device=cpu.")
+import torchaudio
+if getattr(torchaudio, "IS_ANC_DEFENCE_SHIM", False):
+    print("  torchaudio: SHIM (import-only, every call raises)")
+else:
+    print(f"  torchaudio {torchaudio.__version__}")
+import df.enhance
+print("  df.enhance imports")
+PYEOF
 
 # --------------------------------------------------------------- 5. the package
 log "Installing anc_defence and its dependencies"
@@ -164,20 +229,31 @@ PYEOF
 
 # ------------------------------------------------------------------- 7. runtime
 log "Runtime recommendations (not run automatically)"
+CURRENT_MODE="$(sudo nvpmodel -q 2>/dev/null | grep -i 'power mode' || true)"
+if [ -n "$CURRENT_MODE" ]; then
+  echo "  current: $CURRENT_MODE"
+fi
 cat <<'EOF'
-  Put the board in its maximum performance mode before benchmarking or demoing:
+  For benchmarking or a demo, the board should be at maximum performance:
 
-      sudo nvpmodel -m 0        # maximum power mode
-      sudo jetson_clocks        # lock clocks to maximum
+      sudo nvpmodel -m 0        # MAXN. If nvpmodel -q already says MAXN, skip this.
+      sudo jetson_clocks        # lock clocks to maximum (nvpmodel alone does not)
 
-  Both need root and both change the thermal behaviour of the board, so they are
-  printed rather than executed. Check the current mode with:
+  Both need root and both change the board's thermal behaviour, so they are printed
+  rather than executed. MAXN raises the power ceiling; jetson_clocks stops the governor
+  from dropping frequencies mid-measurement, which otherwise shows up as p99 latency
+  outliers in the report.
 
-      sudo nvpmodel -q
+  Audio: check for a capture device with `arecord -l`.
+  Note that the built-in "APE / tegra-dlink XBAR-ADMAIF" entries are the Tegra audio
+  DMA channels, NOT a microphone. If those are all you see, there is no capture
+  hardware attached and the live microphone mode has nothing to record from: plug in a
+  USB microphone or headset, then re-check with `.venv/bin/anc list-devices`.
+  Everything else - offline evaluation, the dashboard, the PDF report - works without
+  any audio hardware at all.
 
-  Audio: confirm the capture device is visible with `arecord -l`, then
-  `.venv/bin/anc list-devices`. The pipeline runs at 48 kHz; if the device refuses
-  that rate, pick another one rather than resampling the capture path.
+  The pipeline runs at 48 kHz. If a device refuses that rate, pick another one rather
+  than resampling the capture path.
 EOF
 
 # ------------------------------------------------------------------ 8. selftest

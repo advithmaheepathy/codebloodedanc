@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any, Literal, Optional, Sequence
+# typing.List/Tuple rather than builtin generics: these annotations sit inside pydantic
+# models, and pydantic evaluates them at runtime to build the schema. `from __future__
+# import annotations` defers evaluation for ordinary functions but not for pydantic
+# fields, so `list[str]` raises "'type' object is not subscriptable" on Python 3.8 --
+# which is what JetPack 5.1.3 ships (Ubuntu 20.04, Python 3.8.10).
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -319,7 +324,7 @@ class MetricsCfg(_Base):
         "normalisation stage would appear to change quality when it has only changed gain. "
         "PESQ, STOI and SI-SDR are unaffected either way.",
     )
-    snr_buckets: list[tuple[float, float]] = [
+    snr_buckets: List[Tuple[float, float]] = [
         (-10.0, -5.0),
         (-5.0, 0.0),
         (0.0, 5.0),
@@ -327,7 +332,7 @@ class MetricsCfg(_Base):
         (10.0, 15.0),
         (15.0, 20.0),
     ]
-    headline_snr_range: tuple[float, float] = (-5.0, 10.0)
+    headline_snr_range: Tuple[float, float] = (-5.0, 10.0)
 
 
 # ------------------------------------------------------------------------ dataset
@@ -343,8 +348,8 @@ class RirCfg(_Base):
 
     enabled: bool = True
     source: Literal["simulated"] = "simulated"
-    room_dim_min: tuple[float, float, float] = (3.0, 3.0, 2.4)
-    room_dim_max: tuple[float, float, float] = (8.0, 7.0, 3.2)
+    room_dim_min: Tuple[float, float, float] = (3.0, 3.0, 2.4)
+    room_dim_max: Tuple[float, float, float] = (8.0, 7.0, 3.2)
     rt60_min_s: float = Field(default=0.15, gt=0.0)
     rt60_max_s: float = Field(default=0.35, gt=0.0)
     max_order: int = Field(default=10, ge=1)
@@ -372,9 +377,9 @@ class AugmentCfg(_Base):
     clipping_threshold_min: float = Field(default=0.5, gt=0.0, le=1.0)
     clipping_threshold_max: float = Field(default=0.95, gt=0.0, le=1.0)
     level_prob: float = Field(default=0.5, ge=0.0, le=1.0)
-    level_range_db: tuple[float, float] = (-12.0, 0.0)
+    level_range_db: Tuple[float, float] = (-12.0, 0.0)
     spectral_tilt_prob: float = Field(default=0.25, ge=0.0, le=1.0)
-    spectral_tilt_db_per_khz: tuple[float, float] = (-1.0, 1.0)
+    spectral_tilt_db_per_khz: Tuple[float, float] = (-1.0, 1.0)
     mic_self_noise_dbfs: Optional[float] = -70.0
 
 
@@ -390,7 +395,7 @@ class DatasetCfg(_Base):
     n_noise_sources_max: int = Field(default=2, ge=1, le=3)
     write_wav: bool = True
     write_hdf5: bool = False
-    subsets: list[str] = ["main", "impulsive", "low_snr"]
+    subsets: List[str] = ["main", "impulsive", "low_snr"]
     rir: RirCfg = RirCfg()
     impulsive: ImpulsiveCfg = ImpulsiveCfg()
     augment: AugmentCfg = AugmentCfg()
@@ -434,10 +439,10 @@ class PlainDatasetCfg(_Base):
     # Stratified sampling for the fast evaluation: this many examples per
     # (category, SNR) cell, drawn with the run seed so the subset is reproducible.
     per_cell: int = Field(default=6, ge=1)
-    categories: Optional[list[str]] = Field(
+    categories: Optional[List[str]] = Field(
         default=None, description="None uses every category present in the metadata."
     )
-    snr_values: Optional[list[float]] = Field(
+    snr_values: Optional[List[float]] = Field(
         default=None, description="None uses every SNR present in the metadata."
     )
     max_duration_s: float = Field(
