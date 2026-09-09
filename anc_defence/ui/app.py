@@ -26,27 +26,36 @@ from pathlib import Path
 from typing import Any, Optional
 
 # Some OpenSSL-backed hashlib builds (observed on JetPack 5.1.x / Python 3.8 aarch64)
-# accept `usedforsecurity` on hashlib.md5(...) but reject it on hashlib.new("md5", ...),
-# even though both should behave identically per the stdlib docs. Streamlit's cache
-# hasher (streamlit/util.py: create_fast_hasher) falls back to exactly that second call
-# when blake2b with a custom digest_size is unavailable, which crashes every cached
-# function - including the one behind the live-mic run - right after a session
-# completes. `usedforsecurity` is only a FIPS-auditing annotation; dropping it changes
-# nothing about the hash itself, so this shim is safe on every platform, not just this
-# one. Must run before Streamlit (or anything it imports) captures a reference to
-# hashlib.new.
-_hashlib_new = hashlib.new
+# raise "'usedforsecurity' is an invalid keyword argument for openssl_md5()" (and the
+# same for sha1/sha256/sha512) even though the stdlib has accepted that kwarg on every
+# hash constructor since Python 3.9. `usedforsecurity` is only a FIPS-auditing
+# annotation - dropping it changes nothing about the hash itself - so catching the
+# TypeError and retrying without it is safe everywhere, not just on this platform.
+#
+# This bites more than one call site:
+#   - Streamlit's own cache hasher (streamlit/util.py: create_fast_hasher) falls back to
+#     hashlib.new("md5", usedforsecurity=False), which crashes every cached function -
+#     including the one behind the live-mic run - right after a session completes.
+#   - Starlette's static/file response code computes an ETag with
+#     hashlib.md5(data, usedforsecurity=False) directly (not via hashlib.new), which is
+#     the likely cause of the report download button not working.
+#
+# All of these do a fresh `hashlib.<name>(...)` attribute lookup at call time rather than
+# `from hashlib import md5` at import time, so patching the shared hashlib module's
+# attributes here fixes every one of them regardless of when the calling library was
+# imported - this only needs to run before the *call*, not before the *import*.
+for _algo in ("md5", "sha1", "sha256", "sha512", "new"):
+    _orig = getattr(hashlib, _algo)
 
+    def _compat(*args, _orig=_orig, **kwargs):
+        try:
+            return _orig(*args, **kwargs)
+        except TypeError:
+            kwargs.pop("usedforsecurity", None)
+            return _orig(*args, **kwargs)
 
-def _hashlib_new_compat(name, *args, **kwargs):
-    try:
-        return _hashlib_new(name, *args, **kwargs)
-    except TypeError:
-        kwargs.pop("usedforsecurity", None)
-        return _hashlib_new(name, *args, **kwargs)
-
-
-hashlib.new = _hashlib_new_compat
+    setattr(hashlib, _algo, _compat)
+del _algo, _orig
 
 import numpy as np
 import streamlit as st
