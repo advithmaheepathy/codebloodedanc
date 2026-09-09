@@ -18,11 +18,35 @@ Everything is pure Python, so this runs unchanged on a Jetson.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+# Some OpenSSL-backed hashlib builds (observed on JetPack 5.1.x / Python 3.8 aarch64)
+# accept `usedforsecurity` on hashlib.md5(...) but reject it on hashlib.new("md5", ...),
+# even though both should behave identically per the stdlib docs. Streamlit's cache
+# hasher (streamlit/util.py: create_fast_hasher) falls back to exactly that second call
+# when blake2b with a custom digest_size is unavailable, which crashes every cached
+# function - including the one behind the live-mic run - right after a session
+# completes. `usedforsecurity` is only a FIPS-auditing annotation; dropping it changes
+# nothing about the hash itself, so this shim is safe on every platform, not just this
+# one. Must run before Streamlit (or anything it imports) captures a reference to
+# hashlib.new.
+_hashlib_new = hashlib.new
+
+
+def _hashlib_new_compat(name, *args, **kwargs):
+    try:
+        return _hashlib_new(name, *args, **kwargs)
+    except TypeError:
+        kwargs.pop("usedforsecurity", None)
+        return _hashlib_new(name, *args, **kwargs)
+
+
+hashlib.new = _hashlib_new_compat
 
 import numpy as np
 import streamlit as st
