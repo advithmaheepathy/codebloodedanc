@@ -39,6 +39,7 @@ Framing strategies
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -161,6 +162,17 @@ class DfnModel:
                 "build of PyTorch, or set neural.device=cpu. This machine's CPU real-time "
                 "factor is well under 1.0, so CPU is a valid choice."
             )
+
+        # df.enhance picks its own device via df.utils.get_device(), which defaults to
+        # cuda:0 whenever torch.cuda.is_available() is True - independent of where we put
+        # the model with model.to(device) below. On a CUDA machine with neural.device=cpu
+        # this puts the weights on CPU but feeds them CUDA tensors:
+        # "Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor) should
+        # be the same". get_device() reads the DEVICE env var first if present, so setting
+        # it here forces the library to agree with our own device choice. This has to
+        # happen before the first `import df.*`, because df.utils evaluates torch.device()
+        # lazily but other df modules may cache torch.cuda state at import time.
+        os.environ["DEVICE"] = device
 
         from df.enhance import init_df
 
