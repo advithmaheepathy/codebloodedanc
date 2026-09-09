@@ -28,16 +28,27 @@ run:
   log_level: INFO
 
 neural:
-  # TUNE. DeepFilterNet3 is 2.1M parameters running per 10 ms frame. On x86 the CPU path
-  # measured RTF 0.075-0.085 single-threaded, and eight threads only reached 0.050-0.076,
-  # so the workload is latency bound rather than throughput bound. A model this small is
-  # usually dominated by kernel-launch overhead on a GPU, so CPU is the starting point
-  # even though this board has CUDA. Confirm with:
-  #     anc -c configs/default.yaml -c configs/jetson.yaml benchmark --threads 1,4,6,8
-  # and only switch to cuda if it measurably wins.
+  # Measured on the actual board (`anc benchmark --threads 1,4,6,8`, Orin NX, MAXN,
+  # 8x A78AE): more threads made the live (chunked) path *worse*, not better - the model
+  # is dominated by per-op kernel-launch overhead, not FLOPs, so a bigger thread pool only
+  # adds coordination cost with nothing to parallelise against.
+  #
+  #   threads   0.5s chunk RTF   1.0s chunk RTF   2.0s chunk RTF   whole_file RTF
+  #        1           0.177            0.160            0.150           0.163
+  #        4           0.374            0.325            0.237           0.178
+  #        6           0.447            0.283            0.282           0.181
+  #        8           0.884            0.535            0.499           0.172
+  #
+  # whole_file RTF is flat at ~0.17-0.18 regardless of thread count: no benefit from
+  # threading even on long input. 8 threads on the 0.5 s live chunk reaches RTF 0.88,
+  # uncomfortably close to real time; 1 thread stays at 0.15-0.18 everywhere and leaves
+  # 7 of 8 cores free for capture, the OS and the dashboard.
+  #
+  # CUDA was not benchmarked head-to-head (a 2.1M-parameter model is usually
+  # kernel-launch-bound on GPU too, and CPU already has margin), so this stays on CPU
+  # until that comparison says otherwise.
   device: cpu
-  # 8 A78AE cores; leaving two for the audio callback, the OS and the dashboard.
-  num_threads: 6
+  num_threads: 1
   streaming:
     # Smaller chunks cut live-path buffering latency. The quality cost is measurable:
     # check the agreement column of `anc benchmark --chunk-sizes 0.5,1.0,1.5`.
