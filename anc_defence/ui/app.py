@@ -534,66 +534,256 @@ with tab_corpus:
 # ----------------------------------------------------------------------- live
 
 with tab_live:
-    st.header("Live microphone")
+    st.header("Live microphone session")
     st.caption(
-        "Records from the default input device, runs the pipeline, and compares before and after. "
-        "Use headphones if you enable monitoring elsewhere; this tab does not play back live."
+        "Runs a full live session from here and writes a complete session directory with "
+        "report.pdf and metrics.json, exactly as the terminal `anc run --mode live_mic` does. "
+        "Record one session with ANC off and one with ANC on, then compare them in the Overview tab."
     )
+
+    anc_on = st.toggle(
+        "ANC", value=True,
+        help="On: mic -> preprocess -> DeepFilterNet3 -> volume normalisation. "
+             "Off: the microphone signal passes straight through, no suppression and no "
+             "level control. Off is the baseline the 'on' run is compared against.",
+    )
+    if anc_on:
+        st.success("**ANC ON** - full pipeline: DeepFilterNet3 + volume normalisation")
+    else:
+        st.warning(
+            "**ANC OFF** - passthrough. The report will show no noise removed and no level "
+            "correction. This is the intended baseline, not a fault."
+        )
+
     try:
         from anc_defence.audio.devices import format_device_table, list_devices
 
         devices = [d for d in list_devices() if d["max_input_channels"] > 0]
         names = [f"{d['index']}: {d['name']}" for d in devices]
-        chosen = st.selectbox("Input device", names, index=0 if names else None)
-        seconds = st.slider("Recording length (s)", 2, 20, 6)
+        if not names:
+            st.error("No input devices found. A microphone is required for a live session.")
+            raise RuntimeError("no input device")
 
-        if st.button("Record and process", type="primary"):
-            import sounddevice as sd
+        col_a, col_b = st.columns(2)
+        with col_a:
+            chosen = st.selectbox("Input device", names, index=0)
+            seconds = st.slider("Session length (s)", 5, 60, 20)
+        with col_b:
+            profile = st.selectbox(
+                "Latency profile",
+                ["low_latency", "balanced", "quality", "max_suppression"],
+                index=0,
+                help="Larger chunks remove more noise but lag further behind.",
+                disabled=not anc_on,
+            )
+            monitor = st.checkbox(
+                "Monitor to speakers/headphones", value=False,
+                help="Plays the processed audio out live. Use headphones - speakers will feed "
+                     "back into the microphone and ruin the recording.",
+            )
 
-            index = int(chosen.split(":")[0])
-            with st.spinner(f"Recording {seconds} s... speak now"):
-                captured = sd.rec(
-                    int(seconds * SR), samplerate=SR, channels=1, dtype="float32", device=index
+        # Injecting a known noise at a known SNR gives the run a pseudo-clean reference (the
+        # pre-mix microphone capture), which is the only way a live run can report PESQ, STOI
+        # and SI-SDR. Without it only levels and a reference-free SNR estimate are available.
+        with st.expander(
+            "Inject noise digitally (enables PESQ / STOI / SI-SDR on a live run)", expanded=False
+        ):
+            st.caption(
+                "Mixes a noise file into the captured microphone signal at a chosen SNR and keeps "
+                "the pre-mix capture as the reference. Without this, a live run has no clean "
+                "reference, so only levels and a reference-free SNR estimate can be reported."
+            )
+            inject = st.checkbox("Inject noise", value=False)
+            noise_path: Optional[str] = None
+            inject_snr = 0.0
+            if inject:
+                records, _ = get_corpus_records()
+                noise_options = sorted(
+                    {r["noise_path"] for r in records if r.get("noise_path")}
                 )
-                sd.wait()
-            mic = np.ascontiguousarray(captured[:, 0])
+                if noise_options:
+                    labels = [Path(p).name for p in noise_options[:400]]
+                    pick = st.selectbox("Noise file (from the corpus)", labels, index=0)
+                    noise_path = noise_options[labels.index(pick)]
+                    inject_snr = st.slider("Injected SNR (dB)", -10.0, 15.0, 0.0, 2.5)
+                else:
+                    st.info("No noise-only files found in the corpus metadata.")
 
-            from anc_defence.pipeline import Pipeline
+        if st.button(
+            f"Run {seconds} s live session with ANC {'ON' if anc_on else 'OFF'}",
+            type="primary",
+        ):
+            from anc_defence.modes.live import run_live
 
             run_cfg = cfg.model_copy(deep=True)
+            run_cfg.pipeline.order = (  # type: ignore[assignment]
+                "dfn_then_normalise" if anc_on else "passthrough"
+            )
+            # Tags the session directory, so the two runs are told apart in Overview.
+            run_cfg.run.name = "anc_on" if anc_on else "anc_off"
             run_cfg.neural.device = device  # type: ignore[assignment]
             run_cfg.neural.num_threads = thread_count
-            with st.spinner("Processing..."):
-                t0 = time.perf_counter()
-                pipe = Pipeline(run_cfg, model=get_model(device, thread_count))
-                result = pipe.process(mic)
-                elapsed = time.perf_counter() - t0
+            run_cfg.live.duration_s = float(seconds)
+            run_cfg.live.input_device = chosen.split(":")[0]
+            run_cfg.live.monitor = bool(monitor)
+            run_cfg.live.latency_profile = profile if anc_on else "low_latency"  # type: ignore[assignment]
+            if noise_path:
+                run_cfg.live.noise_file = Path(noise_path)
+                run_cfg.live.noise_snr_db = float(inject_snr)
 
-            st.success(f"processed {seconds} s in {elapsed:.2f} s (RTF {elapsed / seconds:.3f})")
-            taps = result.taps(include_reference=False)
-            from anc_defence.metrics.nonintrusive import estimate_snr_db
+            status = st.empty()
+            status.info(f"Recording {seconds} s - speak now.")
+            with st.spinner(f"Live session running for {seconds} s..."):
+                try:
+                    artefacts = run_live(run_cfg)
+                except Exception as exc:  # noqa: BLE001
+                    status.empty()
+                    st.error(f"Live session failed: {exc}")
+                    artefacts = {}
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Input level", f"{active_speech_dbfs(mic, SR):.1f} dBFS")
-            c2.metric("Output level", f"{active_speech_dbfs(result.output, SR):.1f} dBFS",
-                      f"target {cfg.normalise.target_dbfs:g}")
-            c3.metric("Estimated SNR change",
-                      f"{estimate_snr_db(result.output, SR) - estimate_snr_db(mic, SR):+.1f} dB")
+            if artefacts:
+                status.empty()
+                anchor = artefacts.get("pdf") or artefacts.get("json") or artefacts.get("csv")
+                session_dir = Path(anchor).parent
+                st.success(f"Session written: `{session_dir.name}`")
+                st.session_state["last_live_session"] = str(session_dir)
+                load_session.clear()
 
-            cols = st.columns(3)
-            with cols[0]:
-                player("recorded input", mic)
-            with cols[1]:
-                player("pipeline output", result.output)
-            with cols[2]:
-                player("removed", result.removed(), "should contain no intelligible speech")
+                payload = json.loads(
+                    (session_dir / "metrics.json").read_text(encoding="utf-8")
+                ) if (session_dir / "metrics.json").is_file() else {}
 
-            st.pyplot(waveform_figure(taps), use_container_width=True)
-            st.pyplot(spectrogram_figure(taps), use_container_width=True)
-            st.markdown("**input to output**")
-            st.pyplot(delta_figure(result.primary, result.output), use_container_width=True)
-            if pipe.normaliser is not None:
-                st.json(pipe.normaliser.summary())
+                badge = "ANC ON" if anc_on else "ANC OFF"
+                st.subheader(f"Result - {badge}")
+
+                intrusive = payload.get("intrusive", {})
+                nonint = payload.get("non_intrusive", {})
+                latency_ms = payload.get("latency", {}).get("measured_latency_ms")
+                rtf_total = payload.get("system", {}).get("rtf_total")
+
+                nr = nonint.get("noise_reduction_db")
+                snr_change = nonint.get("estimated_snr_change_db")
+                k1, k2, k3 = st.columns(3)
+                k1.metric(
+                    "Noise removed",
+                    "n/a" if nr is None else f"{nr:+.1f} dB",
+                    help="Level drop where the talker is silent. Needs no clean reference. "
+                         "0 dB when ANC is off.",
+                )
+                k2.metric(
+                    "Estimated SNR change",
+                    "n/a" if snr_change is None else f"{snr_change:+.1f} dB",
+                    help="Reference-free SNR estimate, output minus input.",
+                )
+                k3.metric(
+                    "Output level",
+                    "n/a" if nonint.get("output_level_dbfs") is None
+                    else f"{nonint['output_level_dbfs']:.1f} dBFS",
+                    help=f"Normaliser target is {cfg.normalise.target_dbfs:g} dBFS when ANC is on.",
+                )
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Pipeline", run_cfg.pipeline.order)
+                m2.metric(
+                    "Measured latency",
+                    "n/a" if latency_ms is None else f"{latency_ms:.0f} ms",
+                )
+                m3.metric("RTF", "n/a" if rtf_total is None else f"{rtf_total:.3f}")
+                m4.metric("xruns", str(payload.get("ring", {}).get("overruns", 0)))
+
+                if intrusive:
+                    st.markdown("**Quality against the pre-mix reference**")
+                    inp, outp = intrusive.get("input", {}), intrusive.get("output", {})
+                    rows = []
+                    for label, key in (
+                        ("PESQ (wb)", "pesq"), ("STOI", "stoi"), ("ESTOI", "estoi"),
+                        ("SI-SDR dB", "si_sdr"),
+                    ):
+                        b, e = inp.get(key), outp.get(key)
+                        if b is not None and e is not None:
+                            rows.append({
+                                "metric": label, "input": round(b, 3),
+                                "output": round(e, 3), "change": round(e - b, 3),
+                            })
+                    if rows:
+                        import pandas as pd
+
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                     hide_index=True)
+                else:
+                    st.info(
+                        "No clean reference for this run, so PESQ / STOI / SI-SDR are not "
+                        "available. Enable noise injection above if you need them, or read the "
+                        "level and estimated-SNR figures in the report."
+                    )
+
+                for name, label in (
+                    ("input", "recorded input"), ("output", "pipeline output"),
+                ):
+                    wav = session_dir / "audio" / f"{name}.wav"
+                    if wav.is_file():
+                        st.markdown(f"**{label}**")
+                        st.audio(str(wav))
+
+                pdf = session_dir / "report.pdf"
+                if pdf.is_file():
+                    st.download_button(
+                        "Download report.pdf", pdf.read_bytes(),
+                        file_name=f"{session_dir.name}_report.pdf", mime="application/pdf",
+                    )
+                st.caption(f"Full report and figures: `{session_dir}`")
+
+        # ---- ANC off vs on comparison ---------------------------------------
+        live_sessions = [d for d in sessions() if "live_mic" in d.name]
+        off = [d for d in live_sessions if d.name.endswith("anc_off")]
+        on = [d for d in live_sessions if d.name.endswith("anc_on")]
+        if off and on:
+            st.divider()
+            st.subheader("ANC off versus ANC on")
+            st.caption(
+                "Most recent run of each. Both used the same microphone and the same code path; "
+                "the only difference is whether the suppression and normalisation stages ran."
+            )
+            rows = []
+            for label, d in (("ANC off", off[0]), ("ANC on", on[0])):
+                p = d / "metrics.json"
+                if not p.is_file():
+                    continue
+                pl = json.loads(p.read_text(encoding="utf-8"))
+                ni = pl.get("non_intrusive", {})
+                rows.append({
+                    "run": label,
+                    "session": d.name,
+                    "pipeline": pl.get("config", {}).get("pipeline", {}).get("order", "?"),
+                    "noise removed dB": (
+                        None if ni.get("noise_reduction_db") is None
+                        else round(ni["noise_reduction_db"], 2)
+                    ),
+                    "est. SNR change dB": (
+                        None if ni.get("estimated_snr_change_db") is None
+                        else round(ni["estimated_snr_change_db"], 2)
+                    ),
+                    "output level dBFS": (
+                        None if ni.get("output_level_dbfs") is None
+                        else round(ni["output_level_dbfs"], 1)
+                    ),
+                    "latency ms": pl.get("latency", {}).get("measured_latency_ms"),
+                    "RTF": pl.get("system", {}).get("rtf_total"),
+                })
+            if rows:
+                import pandas as pd
+
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                for label, d in (("ANC off", off[0]), ("ANC on", on[0])):
+                    wav = d / "audio" / "output.wav"
+                    if wav.is_file():
+                        st.markdown(f"**{label} - output**")
+                        st.audio(str(wav))
+
+        last = st.session_state.get("last_live_session")
+        if last:
+            st.caption(f"Most recent live session: `{Path(last).name}`. "
+                       f"Switch the ANC toggle and run again to produce the paired session.")
 
         with st.expander("All audio devices"):
             st.code(format_device_table(), language=None)

@@ -35,6 +35,8 @@ from ..audio.devices import check_settings, device_name, resolve_device
 from ..audio.io import dbfs, load_audio
 from ..audio.ringbuffer import RingBuffer
 from ..config import Config
+from ..dsp.vad import speech_mask
+from ..metrics.erle import noise_reduction_db
 from ..metrics.intrusive import compute_intrusive
 from ..metrics.nonintrusive import DnsmosEstimator, estimate_snr_db
 from ..metrics.system import collect_system_metrics
@@ -480,17 +482,55 @@ def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
 
     dnsmos = DnsmosEstimator() if cfg.metrics.dnsmos else None
     rows = [["Signal", "Estimated SNR (dB)", "Level (dBFS)", "DNSMOS OVRL"]]
+    nonintrusive: dict[str, float] = {}
     for name in ("input", "output"):
         sig = taps.get(name)
         if sig is None or not sig.size:
             continue
         ovrl = "not enabled"
         if dnsmos is not None:
-            ovrl = f"{dnsmos.score(sig, sr).dnsmos_ovrl:.2f}"
-        rows.append([name, f"{estimate_snr_db(sig, sr):.1f}", f"{dbfs(sig):.1f}", ovrl])
+            score = dnsmos.score(sig, sr)
+            ovrl = f"{score.dnsmos_ovrl:.2f}"
+            nonintrusive[f"{name}_dnsmos_ovrl"] = float(score.dnsmos_ovrl)
+        est, lvl = estimate_snr_db(sig, sr), dbfs(sig)
+        nonintrusive[f"{name}_estimated_snr_db"] = float(est)
+        nonintrusive[f"{name}_level_dbfs"] = float(lvl)
+        rows.append([name, f"{est:.1f}", f"{lvl:.1f}", ovrl])
+    if "input_estimated_snr_db" in nonintrusive and "output_estimated_snr_db" in nonintrusive:
+        nonintrusive["estimated_snr_change_db"] = (
+            nonintrusive["output_estimated_snr_db"] - nonintrusive["input_estimated_snr_db"]
+        )
     data.add_table("Non-intrusive metrics", rows,
                    "Available without a reference. The output level should sit close to the "
                    f"normaliser target of {cfg.normalise.target_dbfs:g} dBFS.")
+
+    # Reference-free noise reduction: the level drop between input and output measured only
+    # where the talker is silent. This needs no clean reference, so unlike PESQ or STOI it
+    # is available on any live run, and it is the figure a listener would call "noise
+    # cancellation". With the pipeline bypassed it is 0 dB by construction, which is what
+    # makes an ANC-off run a usable baseline.
+    pin, pout = taps.get("input"), taps.get("output")
+    if pin is not None and pout is not None and pin.size and pout.size:
+        n = min(len(pin), len(pout))
+        silent = ~speech_mask(pin[:n], cfg.vad, sr)
+        live_nr = noise_reduction_db(pin[:n], pout[:n], silent)
+        speech_kept = float(np.mean(silent)) if silent.size else float("nan")
+        if np.isfinite(live_nr):
+            nonintrusive["noise_reduction_db"] = float(live_nr)
+            nonintrusive["silent_fraction"] = speech_kept
+            data.add_table(
+                "Noise removed (reference-free)",
+                [
+                    ["Quantity", "Value"],
+                    ["Level drop in talker-silent regions", f"{live_nr:+.2f} dB"],
+                    ["Fraction of the run the talker was silent", f"{100.0 * speech_kept:.0f} %"],
+                ],
+                "Measured between the pipeline input and output in the regions the voice-activity "
+                "detector marked as speech-free, so attenuating the talker cannot inflate it. This "
+                "is the headline live figure: it needs no clean reference, and it is 0 dB when the "
+                "pipeline is bypassed.",
+            )
+    data.payload["non_intrusive"] = nonintrusive
 
     if engine.normaliser is not None and engine.normaliser.enabled:
         summary = engine.normaliser.summary()
