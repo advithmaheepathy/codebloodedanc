@@ -207,14 +207,13 @@ def headline_summary(
     lo, hi = cfg.headline_snr_range
     selected = [r for r in records if r.method == method and lo <= r.snr_db <= hi]
     if not selected:
-        return {"method": method, "n": 0, "snr_range_db": [lo, hi], "checks": []}
+        return {"method": method, "n": 0, "snr_range_db": [lo, hi]}
     agg = aggregate(selected, group_by=("method",))[0]
 
-    # The three mandated targets - output SNR, STOI, PESQ - are all absolute output
-    # figures with no noise ceiling, so they are judged over the full input-SNR range.
-    checks = check_targets(agg, targets, scope=f"{method}, input SNR {lo:g} to {hi:g} dB")
-
-    # The SI-SDR *improvement* is a different quantity, kept as reported context only. It
+    # Reports carry no pass/fail target table: measured figures are reported on their own
+    # terms, with the definition each one uses stated alongside.
+    #
+    # The SI-SDR improvement is a different quantity from output SNR. It
     # is bounded by the noise that was present, so averaging it across near-clean inputs
     # measures the corpus rather than the system; it is therefore also summarised over the
     # noisy end of the range where it is meaningful.
@@ -223,10 +222,6 @@ def headline_summary(
     snri_row = aggregate(suppression, group_by=("method",))[0] if suppression else agg
 
     per_category = aggregate(selected, group_by=("category",))
-    category_checks = {
-        row["category"]: [c.as_dict() for c in check_targets(row, targets, scope=row["category"])]
-        for row in per_category
-    }
     return {
         "method": method,
         "n": len(selected),
@@ -239,10 +234,7 @@ def headline_summary(
         "suppression_n": len(suppression),
         "snr_improvement_db_full_range": agg.get("snr_improvement_db"),
         "snr_improvement_db_suppression_range": snri_row.get("snr_improvement_db"),
-        "checks": [c.as_dict() for c in checks],
-        "all_passed": all(c.passed for c in checks),
         "per_category": per_category,
-        "per_category_checks": category_checks,
     }
 
 

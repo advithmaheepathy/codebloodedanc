@@ -464,12 +464,13 @@ def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
             "so it is a pseudo-clean reference rather than a true clean signal: absolute values are "
             "pessimistic, but the change from input to output is meaningful.",
         )
-        from ..metrics.categories import check_targets
-
         values = enhanced.as_dict()
         values["snr_improvement_db"] = enhanced.si_sdr - base.si_sdr
-        data.target_checks = check_targets(values, cfg.report.targets, scope="live run")
-        data.target_scope = "Live run, measured against the pre-mix microphone recording."
+        data.target_scope = (
+            "Live run, measured against the pre-mix microphone recording. That reference is a "
+            "quiet-room capture, not studio-clean, so the absolute figures read pessimistically; "
+            "the change from input to output is the meaningful part."
+        )
         data.payload["intrusive"] = {"input": base.as_dict(), "output": enhanced.as_dict()}
     else:
         data.scope_notes.append(

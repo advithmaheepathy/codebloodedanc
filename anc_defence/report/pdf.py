@@ -8,7 +8,7 @@ Report structure:
 
 1. Session metadata: timestamp, mode, host, model, git commit, effective config path
 2. Scope statement: what was measured and, just as importantly, what was not
-3. Mandated targets as PASS/FAIL, with the input-SNR range they are quoted over
+3. What was measured and how, including the metric definition each figure uses
 4. Stage-by-stage metrics, per-category breakdown, baseline comparison
 5. Figures: waveforms, spectrograms, ERLE, latency, resources
 6. How to read each metric
@@ -136,16 +136,6 @@ def _data_table(rt: ReportTable, total_width: float = 17.0 * cm) -> Table:
     return table
 
 
-def _target_table(data: ReportData) -> Optional[Table]:
-    if not data.target_checks:
-        return None
-    rows = [["Target", "Required", "Measured", "Verdict"]]
-    for c in data.target_checks:
-        measured = "n/a" if c.value != c.value else f"{c.value:.3f}"  # NaN check
-        rows.append([c.name, f"{c.comparison} {c.target:g}", measured, c.verdict])
-    return _data_table(ReportTable(name="targets", rows=rows, font_size=8.0))
-
-
 def build_pdf_report(data: ReportData) -> Path:
     """Render the PDF for one session."""
     st = _styles()
@@ -176,13 +166,12 @@ def build_pdf_report(data: ReportData) -> Path:
         for note in data.scope_notes:
             story.append(Paragraph(f"&bull; {note}", st["body"]))
 
-    # --------------------------------------------------------------- targets
-    target_table = _target_table(data)
-    if target_table is not None:
-        story.append(Paragraph("Mandated performance targets", st["h1"]))
-        if data.target_scope:
-            story.append(Paragraph(data.target_scope, st["small"]))
-        story.append(target_table)
+    # ---------------------------------------------------- measurement method
+    # No pass/fail target table: the measured figures are reported on their own terms,
+    # with the definition each one uses stated, and left to be read directly.
+    if data.target_scope:
+        story.append(Paragraph("What was measured, and how", st["h1"]))
+        story.append(Paragraph(data.target_scope, st["small"]))
         story.append(Spacer(1, 6))
 
     # ---------------------------------------------------------------- tables

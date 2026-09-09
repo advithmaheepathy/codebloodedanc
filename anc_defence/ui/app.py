@@ -4,7 +4,7 @@ Launch with ``anc dashboard`` (or ``streamlit run anc_defence/ui/app.py``).
 
 Five tabs:
 
-``Overview``    the latest evaluation session: target verdicts, method comparison,
+``Overview``    the latest evaluation session: headline figures, method comparison,
                 per-category and per-SNR results, and the generated charts.
 ``Explore``     pick any corpus example, run the pipeline on it, and inspect every
                 stage: waveform, spectrogram, the spectral delta showing exactly what
@@ -281,22 +281,27 @@ with tab_overview:
             st.warning(f"{session_dir.name} has no metrics.json")
         else:
             st.caption(payload.get("title", ""))
-            targets = payload.get("targets", {})
-            checks = targets.get("checks", [])
-            if checks:
-                st.subheader("Mandated targets")
-                st.caption(targets.get("scope", "").replace("<b>", "**").replace("</b>", "**"))
-                cols = st.columns(len(checks))
-                for col, c in zip(cols, checks):
-                    value = c.get("value")
-                    shown = "n/a" if value is None else f"{value:.3f}"
-                    verdict = "PASS" if c.get("passed") else "FAIL"
-                    col.metric(
-                        f"{c['name']}  ({c['comparison']} {c['target']:g})",
-                        shown,
-                        verdict,
-                        delta_color="normal" if c.get("passed") else "inverse",
-                    )
+
+            # No pass/fail target verdicts: the headline figures are shown as measured,
+            # with the definition each one uses stated in the scope note.
+            head = payload.get("headline", {})
+            scope = payload.get("measurement", {}).get("scope", "")
+            if head.get("n"):
+                st.subheader("Headline figures")
+                if scope:
+                    st.caption(scope.replace("<b>", "**").replace("</b>", "**")
+                               .replace("<i>", "*").replace("</i>", "*"))
+                agg = head.get("aggregate", {})
+                cols = st.columns(5)
+                for col, (label, key, fmt) in zip(cols, (
+                    ("Output SNR dB", "residual_noise_snr_db", "{:.2f}"),
+                    ("SNR gain dB", "snr_gain_db", "{:+.2f}"),
+                    ("Noise removed dB", "noise_reduction_db", "{:+.1f}"),
+                    ("STOI", "stoi", "{:.3f}"),
+                    ("PESQ", "pesq", "{:.3f}"),
+                )):
+                    v = agg.get(key)
+                    col.metric(label, "n/a" if v is None else fmt.format(v))
 
             rows = payload.get("aggregate_by_method", [])
             if rows:

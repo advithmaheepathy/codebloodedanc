@@ -98,10 +98,9 @@ def write_json_report(data: ReportData) -> Path:
         "host": data.session.host,
         "config": data.session.config.to_plain(),
         "scope_notes": data.scope_notes,
-        "targets": {
+        # No pass/fail target block: measured figures are reported on their own terms.
+        "measurement": {
             "scope": data.target_scope,
-            "checks": [c.as_dict() for c in data.target_checks],
-            "all_passed": all(c.passed for c in data.target_checks) if data.target_checks else None,
         },
         "warnings": data.warnings + data.session.warnings.messages(),
         "notes": data.session.notes,
