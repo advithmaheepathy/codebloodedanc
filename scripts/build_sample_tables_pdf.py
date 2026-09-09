@@ -36,6 +36,11 @@ HEADER_BG = colors.HexColor("#eceff4")
 ACCENT = colors.HexColor("#1f77b4")
 STRIPE = colors.HexColor("#f7f8fa")
 
+# Category, STOI, PESQ, SNR Before, SNR After, SNR Impr. Sized so "Avg SNR Before (dB)"
+# and its siblings have room to sit on one or two wrapped lines without touching the
+# next column.
+CATEGORY_WIDTHS = [0.14, 0.14, 0.14, 0.20, 0.19, 0.19]
+
 
 def styles() -> dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
@@ -60,19 +65,33 @@ def styles() -> dict[str, ParagraphStyle]:
 def data_table(rows: list[list[str]], col_widths: list[float], font_size: float = 8.5) -> Table:
     total = 17.0 * cm
     widths = [total * w for w in col_widths]
-    table = Table(rows, colWidths=widths, repeatRows=1, hAlign="LEFT")
+
+    # Header cells are wrapped Paragraphs, not raw strings: a raw string is drawn at its
+    # natural width and overlaps the next column whenever it does not fit, which is what
+    # was happening with headers like "Avg SNR Before (dB)". A Paragraph wraps to the
+    # column width instead.
+    header_style = ParagraphStyle(
+        "table_header", fontName="Helvetica-Bold", fontSize=font_size - 0.5,
+        leading=font_size + 1.5, alignment=1,  # centre
+    )
+    body: list[list] = [
+        [Paragraph(str(c), header_style) for c in rows[0]]
+    ]
+    for row in rows[1:]:
+        body.append(list(row))
+
+    table = Table(body, colWidths=widths, repeatRows=1, hAlign="LEFT")
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), font_size),
-        ("LEADING", (0, 0), (-1, -1), font_size + 3),
+        ("FONTSIZE", (0, 1), (-1, -1), font_size),
+        ("LEADING", (0, 1), (-1, -1), font_size + 3),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-        ("ALIGN", (0, 0), (0, -1), "LEFT"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 1), (0, -1), "LEFT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, STRIPE]),
     ]
     table.setStyle(TableStyle(style))
@@ -181,7 +200,7 @@ def build(session: Path, out_path: Path) -> Path:
             "4b. Hybrid - NLMS then DFN": "nlms_then_dfn",
             "5. Delivered pipeline (AI + normalise)": "dfn_then_normalise",
         }),
-        col_widths=[0.40, 0.15, 0.16, 0.14, 0.15],
+        col_widths=[0.36, 0.16, 0.18, 0.14, 0.16],
     ))
     story.append(Paragraph(
         "SNR is the classical output SNR (surviving speech power over residual noise power). "
@@ -201,8 +220,8 @@ def build(session: Path, out_path: Path) -> Path:
     ]
     for title, method in sections:
         story.append(Paragraph(title, st["h1"]))
-        story.append(data_table(category_rows(session, method),
-                                 col_widths=[0.22, 0.16, 0.16, 0.16, 0.15, 0.15]))
+        story.append(data_table(category_rows(session, method), col_widths=CATEGORY_WIDTHS,
+                                 font_size=8.0))
         story.append(Spacer(1, 2))
 
     story.append(Paragraph(
