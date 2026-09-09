@@ -72,7 +72,15 @@ def get_corpus_records() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from anc_defence.dataset.plain import load_plain_corpus
 
     cfg = get_config()
-    corpus = load_plain_corpus(cfg.plain)
+    try:
+        corpus = load_plain_corpus(cfg.plain)
+    except FileNotFoundError:
+        # The corpus is gitignored (licence unverified) and is not on every machine that
+        # runs the dashboard, e.g. a fresh Jetson clone. The offline tabs need it; the
+        # Live microphone tab and the report Overview do not. Degrade to an empty result
+        # here rather than crashing the whole page, matching how `anc selftest` treats
+        # the same condition as a warning, not a hard failure.
+        return [], {}
     return [e.as_dict() for e in corpus.examples], corpus.summary()
 
 
