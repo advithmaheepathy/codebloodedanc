@@ -151,6 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
              "authentication, so use 0.0.0.0 only on a network you trust.",
     )
 
+    p_nlms = add_parser(
+        "nlms-dashboard", help="launch the standalone two-microphone NLMS-only dashboard"
+    )
+    p_nlms.add_argument("--port", type=int, default=8502)
+    p_nlms.add_argument("--headless", action="store_true", help="do not open a browser")
+    p_nlms.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind address. Defaults to localhost only; use 0.0.0.0 only on a trusted network.",
+    )
+
     p_bench = add_parser("benchmark", help="measure RTF and chunked-vs-offline agreement")
     p_bench.add_argument("--seconds", type=float, default=10.0, help="audio duration per trial")
     p_bench.add_argument("--trials", type=int, default=3)
@@ -370,6 +380,42 @@ def cmd_corpus(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _launch_streamlit(app_file: str, args: argparse.Namespace) -> int:
+    """Launch a Streamlit app file with the shared server flags."""
+    import subprocess
+
+    app = Path(__file__).with_name(app_file)
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", str(app),
+        "--server.port", str(args.port),
+        "--server.address", args.host,
+        "--server.headless", "true" if args.headless else "false",
+        "--browser.gatherUsageStats", "false",
+    ]
+    print(f"starting the dashboard on http://{args.host}:{args.port}")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print(
+            f"WARNING: binding to {args.host} exposes the dashboard on the network and it has no\n"
+            "         authentication. Anyone who can reach this port can browse the sessions and\n"
+            "         use the microphone tab. Only do this on a network you trust."
+        )
+    print("(Ctrl-C to stop)\n")
+    try:
+        return subprocess.call(cmd)
+    except FileNotFoundError:
+        print(
+            "error: streamlit is not installed. Install it with:\n"
+            "  pip install streamlit==1.39.0",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def cmd_nlms_dashboard(cfg: Config, args: argparse.Namespace) -> int:
+    """Launch the standalone two-microphone NLMS-only dashboard."""
+    return _launch_streamlit("nlms_app.py", args)
+
+
 def cmd_dashboard(cfg: Config, args: argparse.Namespace) -> int:
     """Launch the Streamlit dashboard."""
     import subprocess
@@ -573,6 +619,7 @@ COMMANDS = {
     "calibrate": cmd_calibrate,
     "report": cmd_report,
     "dashboard": cmd_dashboard,
+    "nlms-dashboard": cmd_nlms_dashboard,
     "selftest": cmd_selftest,
 }
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import numpy as np
+
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -115,6 +117,38 @@ def resolve_device(spec: Optional[str], kind: str = "input") -> Optional[int]:
         names = ", ".join(f"{d['index']}:{d['name']}" for d in matches[:6])
         log.warning("'%s' matched %d %s devices (%s); using the first", spec, len(matches), kind, names)
     return int(matches[0]["index"])
+
+
+def check_stereo_input(device: Optional[int], sample_rate: int) -> None:
+    """Verify a device can capture 2 channels at ``sample_rate``.
+
+    Used by the two-microphone NLMS path, where the two transmitters of a stereo mic
+    kit arrive as the left and right channels of a single input device.
+    """
+    check_settings(device, sample_rate, channels=2, kind="input")
+
+
+def channel_independence(stereo: "Any") -> dict[str, float]:
+    """How different the two channels of a stereo capture are.
+
+    Returns the Pearson correlation between L and R and their individual RMS levels in
+    dBFS. A correlation near 1.0 means the device is duplicating one source to both
+    channels (useless as a primary/reference microphone pair); a low correlation with a
+    level difference means two genuinely independent microphones.
+    """
+    arr = np.asarray(stereo, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return {"correlation": float("nan"), "left_dbfs": float("nan"), "right_dbfs": float("nan")}
+    left, right = arr[:, 0], arr[:, 1]
+    lc, rc = left - left.mean(), right - right.mean()
+    denom = float(np.linalg.norm(lc) * np.linalg.norm(rc)) + 1e-20
+    corr = float(np.dot(lc, rc) / denom)
+
+    def _dbfs(x: np.ndarray) -> float:
+        r = float(np.sqrt(np.mean(x**2)))
+        return 20.0 * float(np.log10(r)) if r > 0 else -120.0
+
+    return {"correlation": corr, "left_dbfs": _dbfs(left), "right_dbfs": _dbfs(right)}
 
 
 def device_name(index: Optional[int], kind: str = "input") -> str:
