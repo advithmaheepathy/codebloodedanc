@@ -23,11 +23,12 @@ streaming and the report does not claim it is.
 
 from __future__ import annotations
 
+import collections
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -82,6 +83,56 @@ class LiveStats:
         }
 
 
+class _DemoDelayQueue:
+    """Holds already-processed output blocks for a fixed extra delay before release.
+
+    This exists purely so a live demo (in particular a single-take video recording)
+    can separate the noisy input and the enhanced output in time, without which they
+    audibly/visually overlap at the pipeline's real (sub-second) latency. It does not
+    touch the samples at all: a block that entered the pipeline is bit-identical to
+    the block that eventually comes out of this queue. Only the *release time* is
+    delayed, by holding each block until ``delay_s`` seconds have elapsed since it was
+    produced.
+
+    With ``delay_s == 0`` this is a no-op passthrough (verified by the queue draining
+    immediately), so the real minimum-latency figure the report computes is completely
+    unaffected by whether this feature is used.
+    """
+
+    def __init__(self, delay_s: float, sample_rate: int) -> None:
+        self.delay_s = max(0.0, float(delay_s))
+        self.sample_rate = sample_rate
+        self._queue: collections.deque[tuple[float, np.ndarray]] = collections.deque()
+
+    def push(self, block: np.ndarray, now: Optional[float] = None) -> None:
+        if block.size == 0:
+            return
+        self._queue.append(((now if now is not None else time.perf_counter()), block))
+
+    def pop_ready(self, now: Optional[float] = None) -> list[np.ndarray]:
+        """Return, in order, every block whose hold time has elapsed."""
+        if self.delay_s <= 0.0:
+            out = [b for _, b in self._queue]
+            self._queue.clear()
+            return out
+        now = now if now is not None else time.perf_counter()
+        ready: list[np.ndarray] = []
+        while self._queue and (now - self._queue[0][0]) >= self.delay_s:
+            ready.append(self._queue.popleft()[1])
+        return ready
+
+    def flush(self) -> list[np.ndarray]:
+        """Release everything still queued, regardless of hold time (end of run)."""
+        out = [b for _, b in self._queue]
+        self._queue.clear()
+        return out
+
+    def pending_seconds(self) -> float:
+        if not self._queue:
+            return 0.0
+        return sum(len(b) for _, b in self._queue) / self.sample_rate
+
+
 class LiveEngine:
     """Microphone capture, worker-thread DSP and monitored output."""
 
@@ -101,6 +152,7 @@ class LiveEngine:
         self._stop = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._monitor_gain = 10.0 ** (cfg.live.monitor_gain_db / 20.0)
+        self._demo_delay = _DemoDelayQueue(cfg.live.demo_delay_s, self.sr)
 
         self.recorded_output: list[np.ndarray] = []
         self.recorded_mic: list[np.ndarray] = []
@@ -198,13 +250,24 @@ class LiveEngine:
             timer.stop(audio_s=self.block / self.sr)
 
             if out.size:
-                self.stats.output_dbfs.append(dbfs(out))
-                self.recorded_output.append(out.copy())
+                self._demo_delay.push(out)
+            for ready in self._demo_delay.pop_ready():
+                self.stats.output_dbfs.append(dbfs(ready))
+                self.recorded_output.append(ready.copy())
                 if self.cfg.live.monitor:
-                    self.out_ring.write(out.reshape(-1, 1))
+                    self.out_ring.write(ready.reshape(-1, 1))
 
     # -------------------------------------------------------------------- run
-    def run(self, duration_s: float) -> None:
+    def run(self, duration_s: float, dashboard: Optional[Callable[["LiveEngine", float], None]] = None) -> None:
+        """Start capture, run ``dashboard`` (or the default terminal one) for
+        ``duration_s`` seconds, then stop and drain everything.
+
+        ``dashboard`` lets a caller (e.g. the Streamlit app) drive its own polling
+        loop against this same engine - reading ``self.stats``, ``self.recorded_input``
+        etc. - instead of the terminal rich/plain dashboard. It must block for
+        approximately ``duration_s`` seconds (or return early on user interrupt); the
+        stream teardown and buffered-output flush happen after it returns either way.
+        """
         import sounddevice as sd
 
         in_dev = resolve_device(self.cfg.live.input_device, "input")
@@ -241,9 +304,12 @@ class LiveEngine:
                 )
             for s in streams:
                 s.start()
-            from ..ui.dashboard import LiveDashboard
+            if dashboard is not None:
+                dashboard(self, duration_s)
+            else:
+                from ..ui.dashboard import LiveDashboard
 
-            LiveDashboard(self, duration_s).run()
+                LiveDashboard(self, duration_s).run()
         except KeyboardInterrupt:
             log.info("interrupted by user; finalising the session")
         finally:
@@ -260,7 +326,12 @@ class LiveEngine:
                 self._worker.join(timeout=3.0)
             tail = self.pipeline.flush()
             if tail.size:
-                self.recorded_output.append(tail)
+                self._demo_delay.push(tail)
+            # End of run: release everything still held rather than losing it, even if
+            # its hold time has not fully elapsed yet.
+            for ready in self._demo_delay.flush():
+                self.stats.output_dbfs.append(dbfs(ready))
+                self.recorded_output.append(ready.copy())
 
         log.info(
             "captured %d blocks, emitted %d, xruns %d, underruns %d",
@@ -385,21 +456,32 @@ def apply_latency_profile(cfg: Config) -> Config:
     return out
 
 
-def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
-    """``anc run --mode live_mic``."""
+def run_live(
+    cfg: Config,
+    session: Optional[Session] = None,
+    dashboard: Optional[Callable[["LiveEngine", float], None]] = None,
+) -> dict[str, Path]:
+    """``anc run --mode live_mic``.
+
+    ``dashboard``, if given, replaces the terminal rich/plain dashboard - see
+    :meth:`LiveEngine.run`. Used by the Streamlit app to drive its own live-updating
+    widgets against the same engine instance.
+    """
     cfg = apply_latency_profile(cfg)
     session = session or create_session(cfg, "live_mic")
     log.info(
-        "pipeline: %s  |  latency profile: %s (chunk %.0f ms, context %.0f ms)",
+        "pipeline: %s  |  latency profile: %s (chunk %.0f ms, context %.0f ms)  |  "
+        "demo output delay: %.1f s",
         Pipeline(cfg, load_model=False).describe(),
         cfg.live.latency_profile,
         cfg.neural.streaming.chunk_s * 1000,
         cfg.neural.streaming.context_s * 1000,
+        cfg.live.demo_delay_s,
     )
     sampler = ResourceSampler(interval_s=0.5).start()
     engine = LiveEngine(cfg, session)
     t0 = time.perf_counter()
-    engine.run(cfg.live.duration_s)
+    engine.run(cfg.live.duration_s, dashboard=dashboard)
     wall = time.perf_counter() - t0
     sampler.stop()
 
@@ -428,7 +510,19 @@ def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
             f"({cfg.neural.streaming.chunk_s} s) plus the model's 40 ms algorithmic latency plus "
             f"{cfg.normalise.limiter_lookahead_ms} ms of limiter look-ahead plus device buffering. "
             "This is a demo path, not low-latency streaming.",
-        ],
+        ]
+        + (
+            [
+                f"An additional <b>{cfg.live.demo_delay_s:.1f} s artificial delay</b> was applied to "
+                "the output for this run (live.demo_delay_s). It is a pure post-processing hold: the "
+                "audio samples are not altered in any way, only the moment they are released is "
+                "pushed back. This exists only to make input and output separable in a single-take "
+                "recording; it is <b>not</b> part of the system's real latency, which is reported in "
+                "the Latency budget table below with this delay excluded.",
+            ]
+            if cfg.live.demo_delay_s > 0.0
+            else []
+        ),
     )
     data.metadata_rows = session_metadata_rows(
         session, cfg, engine.pipeline.model.info.as_dict() if engine.pipeline.model else None,
@@ -440,6 +534,11 @@ def run_live(cfg: Config, session: Optional[Session] = None) -> dict[str, Path]:
                 if cfg.live.monitor else "monitoring disabled",
             ),
             ("Requested duration", f"{cfg.live.duration_s:.1f} s"),
+            (
+                "Demo output delay",
+                f"{cfg.live.demo_delay_s:.1f} s (artificial, demo aid only - see note below)"
+                if cfg.live.demo_delay_s > 0.0 else "none (0 s, real minimum latency shown below)",
+            ),
             (
                 "Injected noise",
                 f"{Path(cfg.live.noise_file).name} at {cfg.live.noise_snr_db:g} dB SNR"

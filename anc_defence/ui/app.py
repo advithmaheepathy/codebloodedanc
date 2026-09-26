@@ -236,6 +236,138 @@ def spectrogram_figure(taps: dict[str, np.ndarray], sample_rate: int = SR, n_fft
     return fig
 
 
+def live_waveform_figure(
+    input_signal: np.ndarray, output_signal: np.ndarray, sample_rate: int = SR, window_s: float = 12.0
+):
+    """Stacked input/output waveform, most recent ``window_s`` seconds, for the live-updating panel.
+
+    Same visual convention as the offline ``waveforms`` plot (shared style, one panel per
+    tap, fixed layout) so a viewer sees the same kind of chart whether it is live or in a
+    report - just scrolling. The x-axis is anchored to the newest sample rather than to
+    session start, so it behaves like a scrolling strip-chart instead of stretching wider
+    forever as the session runs.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    window_n = max(1, int(window_s * sample_rate))
+    inp = input_signal[-window_n:] if input_signal.size else input_signal
+    out = output_signal[-window_n:] if output_signal.size else output_signal
+    peak = max(
+        (float(np.max(np.abs(v))) for v in (inp, out) if v.size), default=1.0
+    ) or 1.0
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 3.4), sharex=False)
+    for ax, name, sig, colour in (
+        (axes[0], "input", inp, "#1f77b4"),
+        (axes[1], "output", out, "#d62728"),
+    ):
+        if sig.size:
+            t_end = len(sig) / sample_rate
+            t0 = max(0.0, t_end - window_s)
+            t = t0 + np.arange(len(sig)) / sample_rate
+            ax.plot(t, sig, linewidth=0.4, color=colour)
+            ax.set_xlim(t0, max(t0 + window_s, t_end))
+        ax.set_ylim(-1.05 * peak, 1.05 * peak)
+        ax.set_ylabel(name, fontsize=8)
+        ax.grid(alpha=0.25, linewidth=0.4)
+        ax.tick_params(labelsize=7)
+    axes[-1].set_xlabel("time (s)", fontsize=8)
+    axes[0].set_title(f"Live waveform (last {window_s:.0f} s, shared amplitude scale)", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def run_live_with_live_chart(run_cfg: "Config", seconds: float, refresh_s: float = 0.4):
+    """Run a live session while redrawing a scrolling input/output waveform in-place.
+
+    ``run_live`` (and the ``LiveEngine`` it drives) blocks for the session duration on
+    whichever thread calls it, and Streamlit only redraws widgets between script reruns -
+    it has no built-in animation loop. To get a chart that visibly updates *during* the
+    session rather than only appearing once it ends, the engine is run on a background
+    thread and this (the main Streamlit script) thread polls its already-thread-safe
+    stats/recorded buffers on a timer, redrawing an ``st.empty()`` placeholder - the same
+    pattern ``LiveDashboard`` uses for the terminal meters, just targeting a matplotlib
+    figure instead of a rich table.
+    """
+    import threading
+
+    from anc_defence.modes.live import LiveEngine, run_live
+    from anc_defence.utils.session import create_session
+
+    session = create_session(run_cfg, "live_mic")
+    engine_holder: dict[str, Any] = {}
+    result_holder: dict[str, Any] = {}
+
+    def _capture_engine(engine: LiveEngine, duration_s: float) -> None:
+        # Installed as run_live's dashboard callback: records the engine for the polling
+        # loop below, then blocks for the session exactly as the terminal dashboard would,
+        # so stream teardown / flushing in LiveEngine.run() still happens at the right time.
+        engine_holder["engine"] = engine
+        end = time.perf_counter() + duration_s
+        while time.perf_counter() < end:
+            time.sleep(0.05)
+
+    def _worker() -> None:
+        try:
+            result_holder["artefacts"] = run_live(run_cfg, session=session, dashboard=_capture_engine)
+        except Exception as exc:  # noqa: BLE001
+            result_holder["error"] = exc
+
+    thread = threading.Thread(target=_worker, name="streamlit-live-session", daemon=True)
+    thread.start()
+
+    chart = st.empty()
+    meters = st.empty()
+    # Wait for the engine to exist (stream startup) before the first redraw.
+    t_wait = time.perf_counter()
+    while "engine" not in engine_holder and thread.is_alive() and time.perf_counter() - t_wait < 10.0:
+        time.sleep(0.05)
+
+    engine = engine_holder.get("engine")
+    t0 = time.perf_counter()
+    while thread.is_alive() or (engine is not None and time.perf_counter() - t0 < seconds + 2.0):
+        if engine is not None:
+            inp = engine.signal(engine.recorded_input) if engine.recorded_input else np.zeros(0, dtype=np.float32)
+            outp = engine.signal(engine.recorded_output) if engine.recorded_output else np.zeros(0, dtype=np.float32)
+            chart.pyplot(live_waveform_figure(inp, outp, SR), use_container_width=True)
+            in_db = engine.stats.input_dbfs[-1] if engine.stats.input_dbfs else float("-inf")
+            out_db = engine.stats.output_dbfs[-1] if engine.stats.output_dbfs else float("-inf")
+            elapsed = min(seconds, time.perf_counter() - t0)
+            meters.caption(
+                f"elapsed {elapsed:4.1f} s / {seconds:.0f} s  &middot;  "
+                f"input {in_db:5.1f} dBFS  &middot;  output {out_db:5.1f} dBFS  &middot;  "
+                f"blocks in/out {engine.stats.blocks_in}/{engine.stats.blocks_out}"
+            )
+        if not thread.is_alive():
+            break
+        time.sleep(refresh_s)
+
+    thread.join(timeout=5.0)
+
+    # Leave the final frame on screen (do not clear the placeholders): for a demo
+    # recording, the graph should still be showing the full input/output waveform
+    # after the session ends, not disappear the instant capture stops.
+    if engine is not None:
+        inp = engine.signal(engine.recorded_input) if engine.recorded_input else np.zeros(0, dtype=np.float32)
+        outp = engine.signal(engine.recorded_output) if engine.recorded_output else np.zeros(0, dtype=np.float32)
+        chart.pyplot(
+            live_waveform_figure(inp, outp, SR, window_s=max(seconds, len(inp) / SR if inp.size else seconds)),
+            use_container_width=True,
+        )
+        meters.caption(
+            f"Session finished - {seconds:.0f} s  &middot;  "
+            f"blocks in/out {engine.stats.blocks_in}/{engine.stats.blocks_out}"
+        )
+
+    if "error" in result_holder:
+        st.error(f"Live session failed: {result_holder['error']}")
+        return {}
+    return result_holder.get("artefacts", {})
+
+
 def delta_figure(before: np.ndarray, after: np.ndarray, sample_rate: int = SR, n_fft: int = 1024):
     """Spectral difference: blue is energy removed, red is energy added."""
     import matplotlib
@@ -622,6 +754,14 @@ with tab_live:
                 help="Plays the processed audio out live. Use headphones - speakers will feed "
                      "back into the microphone and ruin the recording.",
             )
+            demo_delay = st.slider(
+                "Demo output delay (s)", 0.0, 10.0, 0.0, 0.5,
+                help="Purely a demo aid: holds the already-processed output before releasing it, so "
+                     "input and output do not overlap when recorded in one take (e.g. for a video). "
+                     "Changes nothing about processing - 0 s is the real, minimum-latency behaviour, "
+                     "and the report's measured latency figure always reflects that real minimum, "
+                     "not this setting. Set once before starting; it cannot be changed mid-session.",
+            )
 
         # Injecting a known noise at a known SNR gives the run a pseudo-clean reference (the
         # pre-mix microphone capture), which is the only way a live run can report PESQ, STOI
@@ -654,8 +794,6 @@ with tab_live:
             f"Run {seconds} s live session with ANC {'ON' if anc_on else 'OFF'}",
             type="primary",
         ):
-            from anc_defence.modes.live import run_live
-
             run_cfg = cfg.model_copy(deep=True)
             run_cfg.pipeline.order = (  # type: ignore[assignment]
                 "dfn_then_normalise" if anc_on else "passthrough"
@@ -668,19 +806,21 @@ with tab_live:
             run_cfg.live.input_device = chosen.split(":")[0]
             run_cfg.live.monitor = bool(monitor)
             run_cfg.live.latency_profile = profile if anc_on else "low_latency"  # type: ignore[assignment]
+            run_cfg.live.demo_delay_s = float(demo_delay)
             if noise_path:
                 run_cfg.live.noise_file = Path(noise_path)
                 run_cfg.live.noise_snr_db = float(inject_snr)
 
             status = st.empty()
             status.info(f"Recording {seconds} s - speak now.")
-            with st.spinner(f"Live session running for {seconds} s..."):
-                try:
-                    artefacts = run_live(run_cfg)
-                except Exception as exc:  # noqa: BLE001
-                    status.empty()
-                    st.error(f"Live session failed: {exc}")
-                    artefacts = {}
+            if demo_delay > 0.0:
+                st.caption(
+                    f"Demo output delay is **{demo_delay:g} s**: the waveform panel below and the "
+                    "monitored/recorded output will lag the input by that much on top of the real "
+                    "pipeline latency."
+                )
+
+            artefacts = run_live_with_live_chart(run_cfg, seconds)
 
             if artefacts:
                 status.empty()
@@ -690,73 +830,13 @@ with tab_live:
                 st.session_state["last_live_session"] = str(session_dir)
                 load_session.clear()
 
-                payload = json.loads(
-                    (session_dir / "metrics.json").read_text(encoding="utf-8")
-                ) if (session_dir / "metrics.json").is_file() else {}
-
-                badge = "ANC ON" if anc_on else "ANC OFF"
-                st.subheader(f"Result - {badge}")
-
-                intrusive = payload.get("intrusive", {})
-                nonint = payload.get("non_intrusive", {})
-                latency_ms = payload.get("latency", {}).get("measured_latency_ms")
-                rtf_total = payload.get("system", {}).get("rtf_total")
-
-                nr = nonint.get("noise_reduction_db")
-                snr_change = nonint.get("estimated_snr_change_db")
-                k1, k2, k3 = st.columns(3)
-                k1.metric(
-                    "Noise removed",
-                    "n/a" if nr is None else f"{nr:+.1f} dB",
-                    help="Level drop where the talker is silent. Needs no clean reference. "
-                         "0 dB when ANC is off.",
-                )
-                k2.metric(
-                    "Estimated SNR change",
-                    "n/a" if snr_change is None else f"{snr_change:+.1f} dB",
-                    help="Reference-free SNR estimate, output minus input.",
-                )
-                k3.metric(
-                    "Output level",
-                    "n/a" if nonint.get("output_level_dbfs") is None
-                    else f"{nonint['output_level_dbfs']:.1f} dBFS",
-                    help=f"Normaliser target is {cfg.normalise.target_dbfs:g} dBFS when ANC is on.",
-                )
-
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pipeline", run_cfg.pipeline.order)
-                m2.metric(
-                    "Measured latency",
-                    "n/a" if latency_ms is None else f"{latency_ms:.0f} ms",
-                )
-                m3.metric("RTF", "n/a" if rtf_total is None else f"{rtf_total:.3f}")
-                m4.metric("xruns", str(payload.get("ring", {}).get("overruns", 0)))
-
-                if intrusive:
-                    st.markdown("**Quality against the pre-mix reference**")
-                    inp, outp = intrusive.get("input", {}), intrusive.get("output", {})
-                    rows = []
-                    for label, key in (
-                        ("PESQ (wb)", "pesq"), ("STOI", "stoi"), ("ESTOI", "estoi"),
-                        ("SI-SDR dB", "si_sdr"),
-                    ):
-                        b, e = inp.get(key), outp.get(key)
-                        if b is not None and e is not None:
-                            rows.append({
-                                "metric": label, "input": round(b, 3),
-                                "output": round(e, 3), "change": round(e - b, 3),
-                            })
-                    if rows:
-                        import pandas as pd
-
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                                     hide_index=True)
-                else:
-                    st.info(
-                        "No clean reference for this run, so PESQ / STOI / SI-SDR are not "
-                        "available. Enable noise injection above if you need them, or read the "
-                        "level and estimated-SNR figures in the report."
+                pdf = session_dir / "report.pdf"
+                if pdf.is_file():
+                    st.download_button(
+                        "Download report.pdf", pdf.read_bytes(),
+                        file_name=f"{session_dir.name}_report.pdf", mime="application/pdf",
                     )
+                st.caption(f"Full report and figures: `{session_dir}`")
 
                 for name, label in (
                     ("input", "recorded input"), ("output", "pipeline output"),
@@ -765,14 +845,6 @@ with tab_live:
                     if wav.is_file():
                         st.markdown(f"**{label}**")
                         st.audio(str(wav))
-
-                pdf = session_dir / "report.pdf"
-                if pdf.is_file():
-                    st.download_button(
-                        "Download report.pdf", pdf.read_bytes(),
-                        file_name=f"{session_dir.name}_report.pdf", mime="application/pdf",
-                    )
-                st.caption(f"Full report and figures: `{session_dir}`")
 
         # ---- ANC off vs on comparison ---------------------------------------
         live_sessions = [d for d in sessions() if "live_mic" in d.name]

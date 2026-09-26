@@ -521,6 +521,19 @@ class LiveCfg(_Base):
     )
     calibration_s: float = Field(default=2.0, ge=0.0)
     save_streams: bool = True
+    demo_delay_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=10.0,
+        description="Demo-only extra delay applied to the OUTPUT after the real pipeline has already "
+        "produced it. It changes nothing about processing quality: the audio is untouched, only the "
+        "moment it is released to the output ring / recording is pushed back. Its purpose is to make "
+        "input and output audibly/visibly non-overlapping when the whole thing is captured in one "
+        "take (e.g. for a demo video), where the real end-to-end latency (well under a second) makes "
+        "the two signals overlap in a way that is confusing to watch. Set to 0 for the real, minimum "
+        "latency figure - which is what the report's 'measured latency' always reflects, independent "
+        "of this setting.",
+    )
 
 
 # --------------------------------------------------------------------------- root

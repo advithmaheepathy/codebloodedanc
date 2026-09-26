@@ -252,6 +252,13 @@ live:
   noise_rir: true
   calibration_s: 2.0
   save_streams: true
+  # Demo-only extra delay applied to the OUTPUT after it has already been produced by
+  # the real pipeline. Pure post-processing hold: samples are untouched, only the release
+  # time is pushed back. 0 = real minimum latency (the default; what every reported
+  # latency figure reflects). Useful for a single-take recording where input and output
+  # would otherwise overlap at the real sub-second latency, e.g. set to 3.0 for a demo
+  # video, then dial back down to 0 on camera to show the real figure.
+  demo_delay_s: 0.0
   # Latency vs suppression, measured at <= 0 dB SNR with no attenuation cap:
   #   low_latency      250 ms chunk ->  265 ms delay, +37.5 dB noise removed, 10.6 dB sp.atten
   #   balanced         500 ms chunk ->  515 ms delay, +37.5 dB, 9.6 dB
