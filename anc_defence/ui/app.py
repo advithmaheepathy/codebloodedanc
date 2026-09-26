@@ -791,9 +791,7 @@ with tab_live:
              "Off: the microphone signal passes straight through, no suppression and no "
              "level control. Off is the baseline the 'on' run is compared against.",
     )
-    if anc_on:
-        st.success("**ANC ON** - full pipeline: DeepFilterNet3 + volume normalisation")
-    else:
+    if not anc_on:
         st.warning(
             "**ANC OFF** - passthrough. The report will show no noise removed and no level "
             "correction. This is the intended baseline, not a fault."
