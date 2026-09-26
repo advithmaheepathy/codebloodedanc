@@ -120,6 +120,31 @@ Five tabs: **Overview** (headline figures + method comparison + per-category/per
   terminal rich/plain dashboard can be swapped out without duplicating the stream
   start/stop/flush logic.
 
+### Live waveform panel performance fix (Jetson) + CUDA note
+- The live panel was slow on the Jetson (fine on the dev laptop): every ~0.4 s redraw
+  tick was re-concatenating the *entire* session's recorded blocks (`np.concatenate`
+  cost grows with session length) and rendering the raw signal (tens of thousands of
+  points/axis) through matplotlib's Agg backend from scratch. Both compete with the
+  single-threaded DSP worker for the same CPU on Jetson's weaker cores.
+  Fixed in `ui/app.py`: `_tail_from_blocks()` walks the block list backwards and stops
+  once enough recent samples exist, so per-tick cost is bounded by the display window
+  (default 12 s), not by total session length; `_downsample_for_plot()` decimates to
+  ~1500 min/max-envelope points per axis before plotting (min/max, not stride, so
+  transient/impulsive peaks between decimated samples are never silently dropped).
+  Default `refresh_s` raised 0.4 -> 0.7 s. Covered by `tests/test_live_chart_perf.py`.
+  The one-time *final* frame at session end still concatenates and plots the full
+  recording (not windowed/decimated) since that only happens once, not per tick.
+- **`neural.device: cuda` is broken for live/streaming use, and it is a bug in the
+  installed `deepfilternet` package, not in this repo.** Confirmed via full traceback
+  on the Jetson: `df/enhance.py`'s `df_features()` calls `audio.numpy()` directly on a
+  tensor that is still on `cuda:0`, with no `.cpu()` anywhere in that third-party
+  function - this repo's own conversion (`streaming.py`'s `_enhance_raw`, chains
+  `.detach().float().cpu().numpy()`) is correct but is never reached because `enhance()`
+  crashes first, during model warmup. Not something to fix here without monkeypatching
+  third-party code; `configs/jetson.yaml` already pins `neural.device: cpu` for
+  unrelated, measured performance reasons (CPU beat CUDA/more-threads in this project's
+  own benchmarking), so this doesn't block anything - just don't set cuda on Jetson.
+
 ### Live microphone tab (built this session)
 - Runs a **full live session from the dashboard** (not terminal-only) and writes a complete
   session directory with `report.pdf` + `metrics.json`, identical to `anc run --mode live_mic`.

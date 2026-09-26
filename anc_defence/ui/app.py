@@ -236,8 +236,59 @@ def spectrogram_figure(taps: dict[str, np.ndarray], sample_rate: int = SR, n_fft
     return fig
 
 
+def _tail_from_blocks(blocks: list[np.ndarray], max_samples: int) -> np.ndarray:
+    """Concatenate only enough of the most recent blocks to cover ``max_samples``.
+
+    ``engine.recorded_input``/``recorded_output`` grow for the whole session, and
+    concatenating the entire list on every redraw tick costs more as the session gets
+    longer even though the live panel only ever displays a trailing window. Walking the
+    list backwards and stopping once enough samples are collected keeps the per-tick
+    cost bounded by the window size, not the session length.
+    """
+    if not blocks:
+        return np.zeros(0, dtype=np.float32)
+    collected: list[np.ndarray] = []
+    total = 0
+    for block in reversed(blocks):
+        collected.append(block)
+        total += len(block)
+        if total >= max_samples:
+            break
+    collected.reverse()
+    out = np.concatenate(collected).astype(np.float32)
+    return out[-max_samples:] if len(out) > max_samples else out
+
+
+def _downsample_for_plot(x: np.ndarray, max_points: int = 1500) -> tuple[np.ndarray, np.ndarray]:
+    """Min/max envelope decimation: ``max_points`` bins, each holding a (min, max) pair.
+
+    A plain stride-based decimation (``x[::step]``) would silently drop transient peaks
+    between the samples it skips - exactly the gunshot/impulsive bursts this project
+    cares about showing. Plotting the interleaved per-bin min/max instead keeps every
+    peak visible while still capping the number of vertices matplotlib has to rasterise,
+    which is what makes each redraw cheap regardless of how many raw samples came in.
+    Returns (t_indices, values) suitable for a single ``ax.plot``.
+    """
+    n = len(x)
+    if n <= max_points * 2:
+        return np.arange(n), x
+    bins = max_points
+    bin_size = n // bins
+    trimmed = x[: bins * bin_size].reshape(bins, bin_size)
+    mins = trimmed.min(axis=1)
+    maxs = trimmed.max(axis=1)
+    # Interleave so the line plot traces min then max within each bin - renders as a
+    # filled-looking envelope without needing fill_between (cheaper to rasterise).
+    idx = np.repeat(np.arange(bins), 2) * bin_size
+    vals = np.empty(bins * 2, dtype=x.dtype)
+    vals[0::2] = mins
+    vals[1::2] = maxs
+    return idx, vals
+
+
 def live_waveform_figure(
-    input_signal: np.ndarray, output_signal: np.ndarray, sample_rate: int = SR, window_s: float = 12.0
+    input_signal: np.ndarray, output_signal: np.ndarray, sample_rate: int = SR, window_s: float = 12.0,
+    max_points_per_axis: int = 1500,
 ):
     """Stacked input/output waveform, most recent ``window_s`` seconds, for the live-updating panel.
 
@@ -246,6 +297,13 @@ def live_waveform_figure(
     report - just scrolling. The x-axis is anchored to the newest sample rather than to
     session start, so it behaves like a scrolling strip-chart instead of stretching wider
     forever as the session runs.
+
+    Each channel is decimated to ``max_points_per_axis`` bins (min/max envelope, see
+    ``_downsample_for_plot``) before plotting: rendering tens of thousands of raw samples
+    through matplotlib's Agg backend on every redraw tick is the main cost of the live
+    panel on slower hardware (e.g. a Jetson's CPU, which is also running the DSP worker
+    thread), and a strip-chart at this physical size cannot show more detail than ~1500
+    points wide anyway.
     """
     import matplotlib
 
@@ -267,8 +325,9 @@ def live_waveform_figure(
         if sig.size:
             t_end = len(sig) / sample_rate
             t0 = max(0.0, t_end - window_s)
-            t = t0 + np.arange(len(sig)) / sample_rate
-            ax.plot(t, sig, linewidth=0.4, color=colour)
+            idx, vals = _downsample_for_plot(sig, max_points_per_axis)
+            t = t0 + idx / sample_rate
+            ax.plot(t, vals, linewidth=0.4, color=colour)
             ax.set_xlim(t0, max(t0 + window_s, t_end))
         ax.set_ylim(-1.05 * peak, 1.05 * peak)
         ax.set_ylabel(name, fontsize=8)
@@ -280,7 +339,9 @@ def live_waveform_figure(
     return fig
 
 
-def run_live_with_live_chart(run_cfg: "Config", seconds: float, refresh_s: float = 0.4):
+def run_live_with_live_chart(
+    run_cfg: "Config", seconds: float, refresh_s: float = 0.7, window_s: float = 12.0,
+):
     """Run a live session while redrawing a scrolling input/output waveform in-place.
 
     ``run_live`` (and the ``LiveEngine`` it drives) blocks for the session duration on
@@ -291,6 +352,15 @@ def run_live_with_live_chart(run_cfg: "Config", seconds: float, refresh_s: float
     stats/recorded buffers on a timer, redrawing an ``st.empty()`` placeholder - the same
     pattern ``LiveDashboard`` uses for the terminal meters, just targeting a matplotlib
     figure instead of a rich table.
+
+    Two things keep each redraw tick's cost bounded by the display window rather than by
+    how long the session has been running, which matters on weaker hardware (a Jetson's
+    CPU is also running the single-threaded DSP worker at the same time):
+    ``_tail_from_blocks`` only concatenates as many recent blocks as the window needs
+    (not the whole session), and ``live_waveform_figure`` decimates to a fixed point
+    count before matplotlib renders anything. ``refresh_s`` defaults slower than the
+    first cut (0.4 s) for the same reason - redrawing less often is a fine trade for a
+    demo aid, and it leaves more CPU for the audio path.
     """
     import threading
 
@@ -326,13 +396,14 @@ def run_live_with_live_chart(run_cfg: "Config", seconds: float, refresh_s: float
     while "engine" not in engine_holder and thread.is_alive() and time.perf_counter() - t_wait < 10.0:
         time.sleep(0.05)
 
+    window_n = int(window_s * SR)
     engine = engine_holder.get("engine")
     t0 = time.perf_counter()
     while thread.is_alive() or (engine is not None and time.perf_counter() - t0 < seconds + 2.0):
         if engine is not None:
-            inp = engine.signal(engine.recorded_input) if engine.recorded_input else np.zeros(0, dtype=np.float32)
-            outp = engine.signal(engine.recorded_output) if engine.recorded_output else np.zeros(0, dtype=np.float32)
-            chart.pyplot(live_waveform_figure(inp, outp, SR), use_container_width=True)
+            inp = _tail_from_blocks(engine.recorded_input, window_n)
+            outp = _tail_from_blocks(engine.recorded_output, window_n)
+            chart.pyplot(live_waveform_figure(inp, outp, SR, window_s=window_s), use_container_width=True)
             in_db = engine.stats.input_dbfs[-1] if engine.stats.input_dbfs else float("-inf")
             out_db = engine.stats.output_dbfs[-1] if engine.stats.output_dbfs else float("-inf")
             elapsed = min(seconds, time.perf_counter() - t0)
